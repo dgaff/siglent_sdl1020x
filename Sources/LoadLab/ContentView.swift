@@ -77,8 +77,8 @@ struct ContentView: View {
                 VSplitView {
                     functionPane(session)
                         .frame(minHeight: 220)
-                    // The battery run dashboard has its own charts.
-                    if chartVisible && !(app.selectedFunction == .battery && session.recorder != nil) {
+                    // The Battery screen is a long form plus its own run charts.
+                    if chartVisible && app.selectedFunction != .battery {
                         LiveChartView(session: session)
                             .frame(minHeight: 180, idealHeight: 300)
                     }
@@ -104,7 +104,7 @@ struct ContentView: View {
             Label("LoadLab", systemImage: "bolt.batteryblock")
         } description: {
             Text(app.scanning ? "Scanning the network for SDL1000X loads…"
-                              : "Double-click an instrument in the sidebar to connect, or add one by IP.")
+                              : "Click Connect next to an instrument in the sidebar, or add one by IP.")
         } actions: {
             Button("Scan Network") { Task { await app.scan() } }.disabled(app.scanning)
         }

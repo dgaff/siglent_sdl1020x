@@ -1,28 +1,28 @@
 import SwiftUI
 import LoadLabCore
 
-enum SidebarItem: Hashable {
-    case device(String)
-    case function(ActiveFunction)
-}
-
 struct SidebarView: View {
     @Bindable var app: AppModel
     @State private var showAdd = false
     @State private var newHost = ""
 
     var body: some View {
-        List(selection: Binding<SidebarItem?>(
-            get: { .function(app.selectedFunction) },
-            set: { if case .function(let f)? = $0 { app.selectedFunction = f } })) {
+        // Selection type and row tags must match exactly (both `ActiveFunction?`), or macOS
+        // SwiftUI silently ignores clicks.
+        List(selection: Binding<ActiveFunction?>(
+            get: { app.selectedFunction },
+            set: { if let f = $0 { app.selectedFunction = f } })) {
             Section {
                 ForEach(app.devices) { d in
-                    DeviceRow(device: d, session: app.session?.host == d.host ? app.session : nil)
-                        .contextMenu {
-                            Button("Connect") { Task { await app.connect(d) } }
-                            Button("Remove", role: .destructive) { app.remove(d) }
-                        }
-                        .onTapGesture(count: 2) { Task { await app.connect(d) } }
+                    // No tap gestures in this List: on macOS they swallow the List's own clicks
+                    // and break row selection. Connecting uses an explicit button instead.
+                    DeviceRow(device: d, session: app.session?.host == d.host && app.session?.port == d.port ? app.session : nil) {
+                        Task { await app.connect(d) }
+                    }
+                    .contextMenu {
+                        Button("Connect") { Task { await app.connect(d) } }
+                        Button("Remove", role: .destructive) { app.remove(d) }
+                    }
                 }
                 if app.devices.isEmpty && !app.scanning {
                     Text("No instruments yet. Scan the network or add one by IP.")
@@ -42,10 +42,10 @@ struct SidebarView: View {
             }
 
             Section("Functions") {
-                ForEach([ActiveFunction.basic, .battery, .list, .program, .ocpt, .ext]) { f in
+                ForEach([ActiveFunction.basic, .battery, .list, .program, .ocpt, .ext], id: \.self) { f in
                     Label(f == .ocpt ? "OCPT / OPPT" : f.label, systemImage: f.symbol)
-                        .tag(SidebarItem.function(f))
                         .badge(f == .battery && app.session?.recorder?.isActive == true ? Text("● rec") : isActive(f) ? Text("active") : nil)
+                        .tag(Optional(f))
                 }
             }
         }
@@ -92,6 +92,12 @@ struct SidebarView: View {
 private struct DeviceRow: View {
     let device: KnownDevice
     let session: DeviceSession?
+    let connect: () -> Void
+
+    private var connected: Bool {
+        guard let s = session else { return false }
+        switch s.link { case .connected, .connecting, .reconnecting: return true; default: return false }
+    }
 
     var body: some View {
         HStack(spacing: 8) {
@@ -100,8 +106,13 @@ private struct DeviceRow: View {
                 Text(device.title).lineLimit(1)
                 Text(status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
+            Spacer(minLength: 4)
+            if !connected {
+                Button("Connect", action: connect)
+                    .controlSize(.small)
+                    .help("Connect to \(device.host)")
+            }
         }
-        .help("Double-click to connect")
     }
 
     private var status: String {
