@@ -100,7 +100,8 @@ public final class RunRecorder {
     private func updateSummary() {
         var s = RunSummary()
         s.samples = samples.count
-        s.duration_s = (info.endedAt ?? samples.last?.date ?? Date()).timeIntervalSince(info.startedAt)
+        // From the recorded data (the last sample), not the wall clock at finish.
+        s.duration_s = (samples.last?.date ?? info.endedAt ?? Date()).timeIntervalSince(info.startedAt)
         s.capacity_mAh = integrator.capacity_mAh
         s.energy_Wh = integrator.energy_Wh
         s.deviceCapacity_mAh = deviceCapacity

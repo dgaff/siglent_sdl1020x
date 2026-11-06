@@ -1,17 +1,28 @@
 import SwiftUI
 import LoadLabCore
 
+enum SidebarDestination: Hashable {
+    case function(ActiveFunction)
+    case library
+}
+
 struct SidebarView: View {
     @Bindable var app: AppModel
     @State private var showAdd = false
     @State private var newHost = ""
 
     var body: some View {
-        // Selection type and row tags must match exactly (both `ActiveFunction?`), or macOS
+        // Selection type and row tags must match exactly (both `SidebarDestination?`), or macOS
         // SwiftUI silently ignores clicks.
-        List(selection: Binding<ActiveFunction?>(
-            get: { app.selectedFunction },
-            set: { if let f = $0 { app.selectedFunction = f } })) {
+        List(selection: Binding<SidebarDestination?>(
+            get: { app.showingLibrary ? .library : .function(app.selectedFunction) },
+            set: {
+                switch $0 {
+                case .library?: app.showingLibrary = true
+                case .function(let f)?: app.showingLibrary = false; app.selectedFunction = f
+                case nil: break
+                }
+            })) {
             Section {
                 ForEach(app.devices) { d in
                     // No tap gestures in this List: on macOS they swallow the List's own clicks
@@ -45,11 +56,18 @@ struct SidebarView: View {
                 ForEach([ActiveFunction.basic, .battery, .list, .program, .ocpt, .ext], id: \.self) { f in
                     Label(f == .ocpt ? "OCPT / OPPT" : f.label, systemImage: f.symbol)
                         .badge(f == .battery && app.session?.recorder?.isActive == true ? Text("● rec") : isActive(f) ? Text("active") : nil)
-                        .tag(Optional(f))
+                        .tag(Optional(SidebarDestination.function(f)))
                 }
+            }
+
+            Section("Library") {
+                Label("Runs", systemImage: "books.vertical")
+                    .badge(app.library.entries.isEmpty ? nil : Text("\(app.library.entries.count)"))
+                    .tag(Optional(SidebarDestination.library))
             }
         }
         .listStyle(.sidebar)
+        .task { await app.library.reload() }
         .sheet(isPresented: $showAdd) { addSheet }
     }
 

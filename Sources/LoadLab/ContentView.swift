@@ -13,7 +13,9 @@ struct ContentView: View {
             SidebarView(app: app)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250)
         } detail: {
-            if let session = app.session, session.link != .disconnected {
+            if app.showingLibrary {
+                LibraryView(library: app.library)
+            } else if let session = app.session, session.link != .disconnected {
                 detail(session)
             } else {
                 welcome
@@ -37,6 +39,7 @@ struct ContentView: View {
         .task {
             // `--connect host[:port]` (used for testing and scripted launches).
             let args = ProcessInfo.processInfo.arguments
+            if args.contains("--library") { app.showingLibrary = true }
             if let i = args.firstIndex(of: "--connect"), i + 1 < args.count {
                 let parts = args[i + 1].split(separator: ":")
                 let host = String(parts[0]), port = parts.count > 1 ? UInt16(parts[1]) ?? 5025 : 5025
@@ -52,7 +55,7 @@ struct ContentView: View {
                     try? await s.startBatteryRun(config: c, cell: cell, options: o)
                     app.selectedFunction = .battery
                 }
-            } else if app.devices.isEmpty {
+            } else if app.devices.isEmpty && !app.showingLibrary {
                 await app.scan()
             }
         }

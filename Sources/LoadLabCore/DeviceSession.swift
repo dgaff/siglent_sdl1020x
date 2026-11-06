@@ -638,6 +638,9 @@ public final class DeviceSession {
 
         let r = try RunRecorder(info: info, store: runStore)
         recorder = r
+        // A resting (open-circuit) reading just before the load starts: gives the analysis an
+        // OCV and a "load applied" resistance step.
+        if let rest = try? await sdl.measureAll() { r.ingest(rest) }
         pollInterval = .milliseconds(Int(1000 / options.sampleRateHz.clamped(to: 0.5...10)))
         await setInput(true)
         guard state.inputOn else {
@@ -656,16 +659,26 @@ public final class DeviceSession {
     }
 
     private func endRun(status: RunStatus, reason: EndReason) async {
-        guard let r = recorder, r.isActive else { return }
+        guard let r = recorder, r.isActive, !ending else { return }
+        ending = true
+        defer { ending = false }
+        // One reading with the load off, for the "load removed" resistance step / rest voltage.
+        if var after = try? await sdl.measureAll() {
+            if abs(after.current) < Self.resistanceCurrentFloor { after.resistance = 0 }
+            r.ingest(after)
+        }
         if state.function == .battery {
             if let c = try? await sdl.batteryDischargedCapacity(), let t = try? await sdl.batteryDischargeTime() {
                 r.updateDeviceCounters(capacity: c, time: t)
             }
         }
-        r.finish(status: status, reason: reason)
+        // Clean up *before* marking the run finished, so "finished" means the user's
+        // Von/latch are back.
         await restoreVOn(r.info)
         pollInterval = idlePollInterval
+        r.finish(status: status, reason: reason)
     }
+    private var ending = false
 
     private func restoreVOn(_ info: RunInfo) async {
         if let v = info.savedVOn { await setVOn(v) }

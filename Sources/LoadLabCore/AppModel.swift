@@ -28,6 +28,9 @@ public final class AppModel {
     public private(set) var scanning = false
     public var session: DeviceSession?
     public var selectedFunction: ActiveFunction = .basic
+    /// The run library replaces the function pane when shown (works without a connection).
+    public var showingLibrary = false
+    public let library = LibraryModel()
 
     private let defaults: UserDefaults
     private static let recentsKey = "recentDevices"
@@ -94,6 +97,7 @@ public final class AppModel {
             upsert(host: device.host, port: device.port, model: id.model, serial: id.serial)
         }
         selectedFunction = s.recorder != nil ? .battery : s.state.function
+        showingLibrary = false
     }
 
     public func disconnect() async {

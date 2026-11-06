@@ -262,3 +262,21 @@ I'll also `git init` the project at Phase 0, so every phase lands as reviewable 
 - **Tests:** 60 simulator/unit tests and 10 T2 hardware tests, all green.
 - **Deferred:** the DCR sub-tab. There's no SCPI command to enter DCR mode, so DCR will be done app-side in the Phase 5 profile engine (pulse IR measurement).
 - **Next:** Phase 4, the run library (index the run folders, browse, overlay, analysis).
+
+### 2026-11-06: Phase 4 done
+- **Library screen** (sidebar → Library → Runs; works offline):
+  - A sortable, searchable table: date, title, chemistry, load, capacity, energy, duration, result.
+  - **One run selected:** metrics, a discharge curve (x = mAh / % nominal / Wh / time), V and I vs time, dQ/dV, a DC-resistance step table, events and settings.
+  - Edit run info, show the files, move a run to the Trash.
+  - **Several runs selected:** an overlay with a legend, plus a comparison table (capacity, % of best, energy, average and midpoint V, DCR, % of nominal).
+- **Analysis** (`RunAnalysis`):
+  - Capacity and energy; time-weighted average V/I/P; midpoint voltage; start/end/min V; rest voltage before and after; SoH vs nominal.
+  - DC resistance from current steps (load applied/removed, pulses).
+  - Smoothed incremental capacity (dQ/dV).
+  - Recorder change: one resting reading is now taken before the load starts and one after it stops, so every run gets these.
+- **Export:** chart as PNG, a one-page PDF report (US Letter), and the CSV in Finder.
+- **Fix:** a run is now only marked finished after the user's Von and latch are restored. A race had let "finished" be observed with the backup cut-off still armed.
+- **Deviation:** no SQLite index. The run folders are scanned directly (fast at this scale, and nothing to drift out of sync).
+- **Test hooks for UI checks:** `--library`, `LOADLAB_RUNS_DIR`, `LOADLAB_SELECT_RUNS`, `LOADLAB_EXPORT_REPORT`, and `LOADLAB_DEMO_RUN` (simulator only).
+- **Tests:** 66 simulator/unit tests. Library views checked by screenshot against synthetic fixtures, where the analysis recovered the fixture cells' set internal resistance (48 mΩ) exactly.
+- **Next:** Phase 5, the profile engine (app-scripted discharges, HPPC-style IR vs SoC, pulse loads, multi-rate) with the safety watchdog.
