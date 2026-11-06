@@ -1,5 +1,7 @@
 # LoadLab
 
+<a href="https://www.buymeacoffee.com/douggaff" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;" ></a>
+
 A native macOS app for the **Siglent SDL1000X** series of programmable DC electronic loads, controlled over the
 network (SCPI over raw TCP, port 5025). It covers what Siglent's Windows-only *EasySDL* utility does: the Basic,
 Battery, List, Program, OCPT/OPPT and Ext screens. It adds a battery-characterization workbench: recorded
@@ -10,8 +12,8 @@ discharges, a run library with overlays and analysis, and app-scripted test prof
 This app was developed and tested against an **SDL1020X** (firmware 1.1.1.23R4). Other SDL1000X models use the same command set
 and should work, but haven't been tried.
 
-> **Status:** personal project, feature-complete for its first round and now in real-world use. See
-> [Testing status](#testing-status) for what has and hasn't been verified on hardware.
+> **Status:** This is a personal project. It's feature-complete for the first round of development, but it needs a ton of testing under real-world conditions. See [Testing status](#testing-status) for what has and hasn't been verified on hardware.
+> Use at your own risk! High voltages and current may be present when you're running tests.
 
 ---
 
