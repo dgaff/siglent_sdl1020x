@@ -172,7 +172,7 @@ public struct ListStep: Sendable, Equatable, Codable, Identifiable {
     public var summary: String { "level \(level) width \(width) slew \(slew)" }
 }
 
-func approx(_ a: Double, _ b: Double) -> Bool { abs(a - b) <= max(1e-6, abs(a) * 1e-6) }
+public func approx(_ a: Double, _ b: Double) -> Bool { abs(a - b) <= max(1e-6, abs(a) * 1e-6) }
 
 /// A Program-function step.
 public struct ProgramStep: Sendable, Equatable, Codable, Identifiable {

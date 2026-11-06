@@ -49,8 +49,10 @@ struct ReadoutBar: View {
             } label: {
                 Label("Trigger", systemImage: "scope")
             }
-            .disabled(!session.link.isUsable)
-            .help("Send a bus trigger (*TRG)")
+            .disabled(!session.link.isUsable || session.state.triggerSource != .bus)
+            .help(session.state.triggerSource == .bus
+                  ? "Send a bus trigger (*TRG)"
+                  : "The trigger source is \(session.state.triggerSource.label): the instrument ignores remote triggers. Change it to Bus in Instrument Settings, or use the front-panel Trigger key. (List and Program runs started from LoadLab switch to Bus for the run.)")
 
             InputSwitch(on: session.state.inputOn, enabled: session.link.isUsable) {
                 Task { await session.setInput(!session.state.inputOn) }

@@ -45,6 +45,9 @@ public final class SDLSimulator: @unchecked Sendable {
 
     private var _sourceVoltage = 0.0
     private var _sourceResistance = 0.05
+    /// Source current limit (like a bench supply's CC limit, or a DUT's over-current
+    /// protection): above it the source collapses. nil = unlimited.
+    private var _sourceCurrentLimit: Double?
     private var _battery: BatteryModel?
 
     private let queue = DispatchQueue(label: "SDLSimulator")
@@ -64,6 +67,13 @@ public final class SDLSimulator: @unchecked Sendable {
     /// Dynamic (transient) operation active; not observable via SCPI on the real device.
     private var dynamicActive = false
     private var dynamicEpoch = Date()
+    // List / Program / OCPT / OPPT runs (behaviour measured on hardware, see hardware-notes):
+    // input ON arms List/Program (step 0) and a BUS trigger starts them; OCP/OPP start at
+    // input ON. All switch the input off at the end.
+    private var seqStart: Date?
+    private var seqStep = 0
+    private var programResults: [Int: Double] = [:]
+    private var programMeasured: Set<Int> = []
     private var dischargedmAh = 0.0
     private var dischargeSeconds = 0.0
     private var lastTick = Date()
@@ -120,6 +130,9 @@ public final class SDLSimulator: @unchecked Sendable {
         }
     }
 
+    /// Number of connected clients (the real SDL allows one).
+    public var clientCount: Int { sync { connections.count } }
+
     /// Drops all client connections (to test reconnect logic).
     public func dropClients() {
         sync { for c in connections.values { c.cancel() }; connections.removeAll() }
@@ -157,7 +170,9 @@ public final class SDLSimulator: @unchecked Sendable {
                 self.busyUntil = max(self.busyUntil, .now()) + cost
                 if let reply = self.execute(line: line) {
                     self.queue.asyncAfter(deadline: self.busyUntil) {
-                        c.send(content: Data((reply + "\n").utf8), completion: .contentProcessed { _ in })
+                        // Real SDL quirk: error-queue entries (non-zero code) end with "\n\n".
+                        let errorEntry = line.uppercased().hasPrefix("SYST:ERR") && reply.hasPrefix("-")
+                        c.send(content: Data((reply + (errorEntry ? "\n\n" : "\n")).utf8), completion: .contentProcessed { _ in })
                     }
                 }
             }
@@ -195,6 +210,8 @@ public final class SDLSimulator: @unchecked Sendable {
         case "SIM:SOURCE:VOLT": if let v { _sourceVoltage = v }
         case "SIM:SOURCE:VOLT?": return f6(_sourceVoltage)
         case "SIM:SOURCE:RES": if let v { _sourceResistance = v }
+        case "SIM:SOURCE:ILIM": _sourceCurrentLimit = v.flatMap { $0 > 0 ? $0 : nil }
+        case "SIM:OCP:STALL": ocpStall = (v ?? 0) > 0      // OCPT/OPPT never end (hardware oddity)
         case "SIM:BATTERY":
             // SIM:BATTERY <capacity_mAh>,<full V>,<empty V>  |  SIM:BATTERY OFF
             if m.arguments.count == 3, let c = Double(m.arguments[0]), let fv = Double(m.arguments[1]), let ev = Double(m.arguments[2]) {
@@ -211,8 +228,22 @@ public final class SDLSimulator: @unchecked Sendable {
 
     /// Current drawn and terminal voltage for the present state.
     private func operatingPoint() -> (v: Double, i: Double) {
+        advanceSequence()
+        let p = rawOperatingPoint()
+        // OCPT/OPPT: the instrument ends the test when the voltage falls below the threshold.
+        if inputOn, seqStart != nil, activeFunction == "OCP" || activeFunction == "OPP",
+           p.v < dbl(":\(activeFunction):VOLT") {
+            inputOn = false; seqStart = nil
+            return (_sourceVoltage, 0)
+        }
+        return p
+    }
+
+    private func rawOperatingPoint() -> (v: Double, i: Double) {
         let vs = _sourceVoltage, rs = max(_sourceResistance, 1e-4)
         guard inputOn else { return (vs, 0) }
+        if activeFunction == "LIST" || activeFunction == "PROGRAM", seqStart == nil { return (vs, 0) }  // armed
+        if activeFunction == "PROGRAM", seqLoadOff { return (vs, 0) }
         let von = dbl(":VOLT:LEV:ON")
         if vs <= von && von > 0 { return (vs, 0) }
         if shortOn { let i = min(vs / rs, iMax()); return (vs - i * rs, i) }
@@ -235,13 +266,81 @@ public final class SDLSimulator: @unchecked Sendable {
             i = vs > vo ? min(dbl(":LED:CURR"), (vs - vo) / rs) : 0
         }
         i = min(max(i, 0), vs / rs, iMax())
+        if let lim = _sourceCurrentLimit, i > lim { return (0.2, lim) }   // source collapses
         return (vs - i * rs, i)
+    }
+
+    // MARK: - Sequences (List / Program / OCPT / OPPT)
+
+    private var seqLoadOff = false
+    private var ocpStall = false
+
+    /// Advances the running sequence to the current time (step, level, end).
+    private func advanceSequence() {
+        guard inputOn, let start = seqStart else { return }
+        let e = Date().timeIntervalSince(start)
+        switch activeFunction {
+        case "LIST":
+            let n = max(1, Int(dbl(":LIST:STEP"))), count = max(1, Int(dbl(":LIST:COUN")))
+            let widths = (1...n).map { dbl(":LIST:WID#\($0)", default: dbl(":LIST:WID")) }
+            let cycle = max(widths.reduce(0, +), 1e-3)
+            if e >= cycle * Double(count) { inputOn = false; seqStart = nil; seqStep = n + 1; return }
+            var r = e.truncatingRemainder(dividingBy: cycle)
+            for (k, w) in widths.enumerated() {
+                if r < w { seqStep = k + 1; break }
+                r -= w
+            }
+        case "PROGRAM":
+            let n = max(1, Int(dbl(":PROG:STEP")))
+            var t = 0.0
+            for k in 1...n {
+                let on = dbl(":PROG:TIME:ON#\(k)", default: 1), off = dbl(":PROG:TIME:OFF#\(k)", default: 1)
+                let delay = dbl(":PROG:TIME:DEL#\(k)", default: 1)
+                if e < t + on {
+                    seqStep = k; seqLoadOff = false
+                    if e >= t + min(delay, on), !programMeasured.contains(k) {
+                        programMeasured.insert(k)
+                        let p = rawOperatingPoint()
+                        programResults[k] = (settings[":PROG:MODE#\(k)"] ?? "CURRENT") == "VOLTAGE" ? p.i : p.v
+                    }
+                    return
+                }
+                if k == n { break }
+                if e < t + on + off { seqStep = k; seqLoadOff = true; return }
+                t += on + off
+            }
+            inputOn = false; seqStart = nil; seqLoadOff = false
+        case "OCP", "OPP":
+            let t = activeFunction
+            let stepDelay = max(dbl(":\(t):STEP:DEL"), 0.01)
+            let level = dbl(":\(t):STAR") + dbl(":\(t):STEP") * (e / stepDelay).rounded(.down)
+            if level > dbl(":\(t):END") + 1e-9, !ocpStall { inputOn = false; seqStart = nil }
+            seqStep = 1
+        default: break
+        }
+    }
+
+    private func sequenceLevel(_ mode: String) -> Double? {
+        guard let start = seqStart else { return nil }
+        switch activeFunction {
+        case "LIST": return dbl(":LIST:LEV#\(max(seqStep, 1))", default: dbl(":LIST:LEV"))
+        case "PROGRAM": return dbl(":PROG:LEV#\(max(seqStep, 1))", default: 1)
+        case "OCP", "OPP":
+            let t = activeFunction
+            let e = Date().timeIntervalSince(start)
+            return min(dbl(":\(t):STAR") + dbl(":\(t):STEP") * (e / max(dbl(":\(t):STEP:DEL"), 0.01)).rounded(.down), dbl(":\(t):END"))
+        default: return nil
+        }
     }
 
     private func iMax() -> Double { 30 }
 
     private func currentStaticMode() -> String {
         switch activeFunction {
+        case "LIST": return settings[":LIST:MODE"] ?? "CURRENT"
+        case "PROGRAM": return settings[":PROG:MODE#\(max(seqStep, 1))"] ?? settings[":PROG:MODE"] ?? "CURRENT"
+        case "OCP": return "CURRENT"
+        case "OPP": return "POWER"
         case "BATTERY": return settings[":BATT:MODE"] ?? "CURRENT"
         default: return settings[":FUNC"] ?? "CURRENT"
         }
@@ -249,6 +348,7 @@ public final class SDLSimulator: @unchecked Sendable {
 
     private func level(for mode: String) -> Double {
         if activeFunction == "BATTERY" { return dbl(":BATT:LEV") }
+        if let l = sequenceLevel(mode) { return l }
         if dynamicActive {
             // Continuous transient: A for AWID seconds, then B for BWID seconds, repeating.
             let key = [("CURRENT", ":CURR"), ("VOLTAGE", ":VOLT"), ("POWER", ":POW"), ("RESISTANCE", ":RES")]
@@ -290,6 +390,7 @@ public final class SDLSimulator: @unchecked Sendable {
     // MARK: - Settings storage helpers
 
     private func dbl(_ key: String) -> Double { Double(settings[key] ?? "") ?? 0 }
+    private func dbl(_ key: String, default d: Double) -> Double { Double(settings[key] ?? "") ?? d }
     private func bool(_ key: String) -> Bool { settings[key] == "1" }
 
     private func f6(_ v: Double) -> String { String(format: "%.6f", v) }
@@ -330,7 +431,7 @@ public final class SDLSimulator: @unchecked Sendable {
         }
         commands.append((SCPIPattern(pattern), { [unowned self] args, _ in
             if indexed, let a = args.first, let v = args.dropFirst().first, let s = Int(a), let n = normalize(v) {
-                if let n = adjust(key: key, value: n) { settings["\(key)#\(s)"] = n }
+                if let n = adjust(key: key, value: n, index: s) { settings["\(key)#\(s)"] = n }
             } else if !indexed, let a = args.first, let n = normalize(a) {
                 if let n = adjust(key: key, value: n) { settings[key] = n }
             } else {
@@ -352,12 +453,25 @@ public final class SDLSimulator: @unchecked Sendable {
     /// step-table edits outside List/Program mode are ignored; out-of-range values are mostly
     /// clamped to the limit, except a CR level below minimum, which is ignored.
     /// Returns the value to store, or nil to ignore the write.
-    private func adjust(key: String, value: String) -> String? {
+    private func adjust(key: String, value: String, index: Int? = nil) -> String? {
         if key.hasPrefix(":LIST:"), ["LEV", "WID", "SLEW"].contains(where: { key.hasSuffix($0) }) {
             return activeFunction == "LIST" ? value : nil
         }
-        if key.hasPrefix(":PROG:"), key != ":PROG:STEP" { return activeFunction == "PROGRAM" ? value : nil }
+        if key.hasPrefix(":PROG:"), key != ":PROG:STEP" { guard activeFunction == "PROGRAM" else { return nil } }
         guard let v = Double(value) else { return value }
+        // Measured: pairs are kept ordered by clamping the value being written.
+        let suffix = index.map { "#\($0)" } ?? ""
+        func other(_ k: String) -> Double { Double(settings[k + suffix] ?? settings[k] ?? "") ?? v }
+        switch key {
+        case ":PROG:MIN": return f6(min(v, other(":PROG:MAX")))
+        case ":PROG:MAX": return f6(max(v, other(":PROG:MIN")))
+        case ":OCP:MIN", ":OPP:MIN": return f6(min(v, other(key.replacingOccurrences(of: "MIN", with: "MAX"))))
+        case ":OCP:MAX", ":OPP:MAX": return f6(max(v, other(key.replacingOccurrences(of: "MAX", with: "MIN"))))
+        case ":OCP:END", ":OPP:END": return f6(max(v, other(key.replacingOccurrences(of: "END", with: "STAR"))))
+        case ":OCP:STAR", ":OPP:STAR": return f6(min(v, other(key.replacingOccurrences(of: "STAR", with: "END"))))
+        default: break
+        }
+        if key.hasPrefix(":PROG:") { return value }
         func clamp(_ lo: Double, _ hi: Double) -> String { f6(min(max(v, lo), hi)) }
         switch key {
         case ":CURR:SLEW:POS", ":CURR:SLEW:NEG", ":CURR:SLEW:BOTH":
@@ -394,7 +508,13 @@ public final class SDLSimulator: @unchecked Sendable {
         command("*ESE?") { _, _ in "0" }
         command("*SRE?") { _, _ in "0" }
         command("*STB?") { _, _ in "0" }
-        command("*TRG") { _, _ in nil }
+        command("*TRG") { [unowned self] _, _ in
+            // Measured: *TRG only acts with TRIG:SOUR BUS (ignored with MANUAL).
+            if settings["TRIG:SOUR"] == "BUS", inputOn, seqStart == nil, activeFunction == "LIST" || activeFunction == "PROGRAM" {
+                seqStart = Date(); seqStep = 1
+            }
+            return nil
+        }
         command("SYSTem:ERRor?") { [unowned self] _, _ in errors.isEmpty ? "+0, No error" : errors.removeFirst() }
 
         command("MEASure:VOLTage[:DC]?") { [unowned self] _, _ in f6(operatingPoint().v) }
@@ -413,6 +533,14 @@ public final class SDLSimulator: @unchecked Sendable {
             if let s = a.first?.uppercased() {
                 let on = s == "ON" || s == "1"
                 if on && !inputOn && activeFunction == "BATTERY" { dischargedmAh = 0; dischargeSeconds = 0 }
+                if on && !inputOn {
+                    seqStep = 0; seqLoadOff = false
+                    // OCPT/OPPT start immediately; List/Program wait for a trigger.
+                    seqStart = (activeFunction == "OCP" || activeFunction == "OPP") ? Date() : nil
+                    if activeFunction == "OCP" || activeFunction == "OPP" { seqStep = 1 }
+                    if activeFunction == "PROGRAM" { programMeasured = [] }
+                }
+                if !on { seqStart = nil }
                 inputOn = on
             }
             return nil
@@ -499,12 +627,12 @@ public final class SDLSimulator: @unchecked Sendable {
         setting("[:SOURce]:LIST:LEVel", key: ":LIST:LEV", .double(2), indexed: true)
         setting("[:SOURce]:LIST:SLEW[:BOTH]", key: ":LIST:SLEW", .double(0.5), indexed: true)
         setting("[:SOURce]:LIST:WIDth", key: ":LIST:WID", .double(1), indexed: true)
-        command("[:SOURce]:LIST:STATe:ON") { [unowned self] _, _ in activeFunction = "LIST"; return nil }
+        command("[:SOURce]:LIST:STATe:ON") { [unowned self] _, _ in activeFunction = "LIST"; inputOn = false; seqStart = nil; seqStep = 0; return nil }
         command("[:SOURce]:LIST:STATe?") { [unowned self] _, _ in activeFunction == "LIST" ? "1" : "0" }
 
         // OCP / OPP
         for t in ["OCP", "OPP"] {
-            command("[:SOURce]:\(t):FUNC") { [unowned self] _, _ in activeFunction = t; return nil }
+            command("[:SOURce]:\(t):FUNC") { [unowned self] _, _ in activeFunction = t; inputOn = false; seqStart = nil; return nil }
             command("[:SOURce]:\(t):FUNC?") { [unowned self] _, _ in activeFunction == t ? "1" : "0" }
             setting("[:SOURce]:\(t):IRANGe", key: ":\(t):IRANG", iR)
             setting("[:SOURce]:\(t):VRANGe", key: ":\(t):VRANG", vR)
@@ -529,11 +657,14 @@ public final class SDLSimulator: @unchecked Sendable {
         setting("[:SOURce]:PROGram:LEVel", key: ":PROG:LEV", .double(1), indexed: true)
         setting("[:SOURce]:PROGram:LED:CURRent", key: ":PROG:LED:CURR", .double(1), indexed: true)
         setting("[:SOURce]:PROGram:LED:RCOnf", key: ":PROG:LED:RCONF", .double(0.2), indexed: true)
-        command("[:SOURce]:PROGram:STATe:ON") { [unowned self] _, _ in activeFunction = "PROGRAM"; return nil }
+        command("[:SOURce]:PROGram:STATe:ON") { [unowned self] _, _ in activeFunction = "PROGRAM"; inputOn = false; seqStart = nil; seqStep = 0; return nil }
         command("[:SOURce]:PROGram:STATe?") { [unowned self] _, _ in activeFunction == "PROGRAM" ? "1" : "0" }
-        command("[:SOURce]:PROGram:TEST?") { _, _ in "0" }
-        command("[:SOURce]:TEST:STEP?") { _, _ in "1" }
-        command("[:SOURce]:TEST:STOP?") { [unowned self] _, _ in inputOn ? "0" : "1" }
+        command("[:SOURce]:PROGram:TEST?") { [unowned self] a, _ in
+            guard let n = a.first.flatMap({ Int($0) }) else { return nil }
+            return f6(programResults[n] ?? 0)
+        }
+        command("[:SOURce]:TEST:STEP?") { [unowned self] _, _ in advanceSequence(); return String(seqStep) }
+        command("[:SOURce]:TEST:STOP?") { _, _ in "0" }      // measured: always 0
 
         // Wave
         command("[:SOURce]:WAVE:TIME?") { _, _ in "8s" }

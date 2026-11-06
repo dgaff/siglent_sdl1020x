@@ -50,6 +50,15 @@ public final class DeviceSession {
     public private(set) var recorder: RunRecorder?
     /// Drives an app-scripted profile run (nil for instrument Battery runs).
     public private(set) var profileRunner: ProfileRunner?
+    /// A List / Program / OCPT / OPPT run (running or the last finished one).
+    public internal(set) var sequence: SequenceRun?
+    /// Bumped around app-initiated input changes for sequences, so a status reading taken
+    /// meanwhile is ignored (same race as profiles; see hardware-notes).
+    var sequenceEpoch = 0
+    /// Grace period past an OCPT/OPPT ramp's longest possible duration before LoadLab stops it.
+    public static let sequenceOverrun: Double = 3
+    /// Results are being collected; the run shows as running until they're in.
+    var sequenceFinishing = false
     /// Keeps the Mac from idle-sleeping while a run is active.
     private var sleepActivity: NSObjectProtocol?
     public var runStore = RunStore()
@@ -152,6 +161,7 @@ public final class DeviceSession {
             history.append(m)
             recorder?.ingest(m)
             if profileRunner?.isActive == true { await checkProfileSafety(m) }
+            if sequence?.phase == .running, sequence?.function == .ocpt || sequence?.function == .oppt { sequence?.trace.append(m) }
             if ContinuousClock.now - lastStatus >= .seconds(1) {
                 lastStatus = ContinuousClock.now
                 try await refreshStatus()
@@ -255,6 +265,8 @@ public final class DeviceSession {
         s.currentMonitor = try await sdl.currentMonitor()
         s.voltageMonitor = try await sdl.voltageMonitor()
         s.externalMode = try await sdl.externalMode()
+        s.extCurrentRange = try await sdl.externalCurrentRange()
+        s.extVoltageRange = try await sdl.externalVoltageRange()
         if s.function != .basic { s.dynamic = false }
         s.battery = try await readBattery()
         s.batteryCapacity_mAh = try await sdl.batteryDischargedCapacity()
@@ -299,6 +311,7 @@ public final class DeviceSession {
     /// Cheap periodic status: input, short, active function (front-panel changes show up here).
     private func refreshStatus() async throws {
         let generation = profileRunner?.inputGeneration
+        let seqEpoch = sequenceEpoch
         let input = try await sdl.inputOn()
         let short = try await sdl.shortOn()
         let fn = try await readFunction()
@@ -313,6 +326,22 @@ public final class DeviceSession {
             state.batteryCapacity_mAh = try await sdl.batteryDischargedCapacity()
             state.batteryTime_s = try await sdl.batteryDischargeTime()
             recorder?.updateDeviceCounters(capacity: state.batteryCapacity_mAh, time: state.batteryTime_s)
+        }
+        // List / Program / OCPT / OPPT: follow the step; the instrument switches the input off at the end.
+        if sequence?.phase == .running {
+            if sequence?.function == .list || sequence?.function == .program {
+                sequence?.step = (try? await sdl.testStep()) ?? sequence?.step ?? 0
+            }
+            if !input, seqEpoch == sequenceEpoch { await finishSequence(.finished) }
+            // OCPT/OPPT that never ends: seen on hardware when the source oscillated in its current
+            // limit instead of collapsing, so the instrument neither tripped nor finished the ramp.
+            else if let r = sequence, r.phase == .running, r.function == .ocpt || r.function == .oppt {
+                let c = r.function == .oppt ? state.oppt : state.ocpt
+                if Date().timeIntervalSince(r.started) > c.maxSeconds + Self.sequenceOverrun {
+                    sequence?.note = "Stopped by LoadLab: the ramp ran \(Int(Self.sequenceOverrun)) s past its longest possible time without the instrument ending it. The source may be current-limiting without its voltage falling below the trip voltage."
+                    await stopSequence()
+                }
+            }
         }
         // A profile expected the input on, but it went off (front panel, protection…).
         if let r = recorder, r.info.kind == "profile" {
@@ -354,7 +383,10 @@ public final class DeviceSession {
             try await sdl.setInput(on)
             self.state.inputOn = try await sdl.inputOn()
         }
-        if !on { await endRun(status: .stopped, reason: .userStopped) }
+        if !on {
+            await endRun(status: .stopped, reason: .userStopped)
+            if sequence?.phase == .running { await finishSequence(.stopped) }
+        }
     }
 
     /// Input OFF, bypassing the `.connected` guard so it works mid-reconnect if possible.
@@ -367,6 +399,7 @@ public final class DeviceSession {
             lastError = "EMERGENCY OFF FAILED: \(error) — switch the input off at the instrument"
         }
         await endRun(status: .stopped, reason: .userStopped)
+        if sequence?.phase == .running { await finishSequence(.stopped) }
     }
 
     public func setShort(_ on: Bool) async {
@@ -948,6 +981,297 @@ extension DeviceSession {
             try await self.refreshAll()
         }
     }
+}
+
+// MARK: - List / Program / OCPT / OPPT / Ext
+
+extension DeviceSession {
+    // Entering a function (the instrument switches the input off).
+
+    public func enterFunction(_ f: ActiveFunction) async {
+        guard f != state.function else { return }
+        if state.inputOn { await setInput(false) }
+        await perform("Switch to \(f.label)") { sdl in
+            switch f {
+            case .basic: try await sdl.setFunction(self.state.mode)
+            case .battery: try await sdl.enterBattery()
+            case .list: try await sdl.enterList()
+            case .program: try await sdl.enterProgram()
+            case .ocpt: try await sdl.enterProtectionTest(.ocp)
+            case .oppt: try await sdl.enterProtectionTest(.opp)
+            case .ext:
+                if try await sdl.externalMode() == .internalControl { try await sdl.setExternalMode(.externalVoltage) }
+            }
+            if f != .ext, try await sdl.externalMode() != .internalControl { try await sdl.setExternalMode(.internalControl) }
+            self.state.externalMode = try await sdl.externalMode()
+            self.state.function = try await self.readFunctionPublic()
+            self.state.dynamic = false
+            self.state.inputOn = try await sdl.inputOn()
+        }
+    }
+
+    func readFunctionPublic() async throws -> ActiveFunction {
+        if try await sdl.inBattery() { return .battery }
+        if try await sdl.inList() { return .list }
+        if try await sdl.inProgram() { return .program }
+        if try await sdl.inProtectionTest(.ocp) { return .ocpt }
+        if try await sdl.inProtectionTest(.opp) { return .oppt }
+        if try await sdl.externalMode() != .internalControl { return .ext }
+        return .basic
+    }
+
+    // List
+
+    public func loadList() async {
+        await perform("Read List") { sdl in
+            var c = ListConfig()
+            c.mode = try await sdl.listMode()
+            c.currentRange = try await sdl.listCurrentRange()
+            c.voltageRange = try await sdl.listVoltageRange()
+            c.resistanceRange = try await sdl.listResistanceRange() ?? .low
+            c.count = try await sdl.listCount()
+            let n = try await sdl.listStepCount().clamped(to: SDLLimits.listSteps)
+            c.steps = []
+            for k in 1...n { c.steps.append(try await sdl.listStep(k)) }
+            self.state.list = c
+        }
+    }
+
+    /// Writes what differs (entering List first: step edits are ignored otherwise), then reads back.
+    @discardableResult
+    public func applyList(_ wanted: ListConfig) async -> Bool {
+        let have = state.list
+        let ok = await perform("Write List") { sdl in
+            if !(try await sdl.inList()) {
+                if self.state.inputOn { try await sdl.setInput(false) }
+                try await sdl.enterList()
+                self.state.function = .list
+            }
+            if wanted.mode != have.mode { try await sdl.setListMode(wanted.mode) }
+            if wanted.currentRange != have.currentRange { try await sdl.setListCurrentRange(wanted.currentRange) }
+            if wanted.voltageRange != have.voltageRange { try await sdl.setListVoltageRange(wanted.voltageRange) }
+            if wanted.mode == .cr, wanted.resistanceRange != have.resistanceRange { try await sdl.setListResistanceRange(wanted.resistanceRange) }
+            if wanted.count != have.count { try await sdl.setListCount(wanted.count) }
+            if wanted.steps.count != have.steps.count { try await sdl.setListStepCount(wanted.steps.count) }
+            for (i, st) in wanted.steps.enumerated() {
+                let n = i + 1
+                let old = i < have.steps.count ? have.steps[i] : nil
+                if old.map({ !approx($0.level, st.level) }) ?? true { try await sdl.write(":LIST:LEV \(n),\(StepCSV.fmt(st.level))") }
+                if old.map({ !approx($0.width, st.width) }) ?? true { try await sdl.write(":LIST:WID \(n),\(StepCSV.fmt(st.width))") }
+                if old.map({ !approx($0.slew, st.slew) }) ?? true { try await sdl.write(":LIST:SLEW \(n),\(StepCSV.fmt(st.slew))") }
+            }
+        }
+        await loadList()
+        return ok && lastError == nil
+    }
+
+    // Program
+
+    public func loadProgram() async {
+        await perform("Read Program") { sdl in
+            var c = ProgramConfig()
+            let n = try await sdl.programStepCount().clamped(to: SDLLimits.programSteps)
+            c.steps = []
+            for k in 1...n { c.steps.append(try await sdl.programStep(k, full: true)) }
+            c.stopOnFail = try await sdl.stopOnFail()
+            self.state.program = c
+            self.state.stopOnFail = c.stopOnFail
+        }
+    }
+
+    @discardableResult
+    public func applyProgram(_ wanted: ProgramConfig) async -> Bool {
+        let have = state.program
+        let ok = await perform("Write Program") { sdl in
+            if !(try await sdl.inProgram()) {
+                if self.state.inputOn { try await sdl.setInput(false) }
+                try await sdl.enterProgram()
+                self.state.function = .program
+            }
+            if wanted.steps.count != have.steps.count { try await sdl.setProgramStepCount(wanted.steps.count) }
+            for (i, st) in wanted.steps.enumerated() {
+                let old = i < have.steps.count ? have.steps[i] : nil
+                try await sdl.setProgramStep(i + 1, st, changedFrom: old)
+            }
+            if wanted.stopOnFail != have.stopOnFail { try await sdl.setStopOnFail(wanted.stopOnFail) }
+        }
+        await loadProgram()
+        return ok && lastError == nil
+    }
+
+    // OCPT / OPPT
+
+    private func testKind(_ f: ActiveFunction) -> SDL1000X.ProtectionTest { f == .oppt ? .opp : .ocp }
+
+    public func loadProtectionTest(_ f: ActiveFunction) async {
+        let t = testKind(f)
+        await perform("Read \(t.label)") { sdl in
+            var c = ProtectionTestConfig()
+            c.currentRange = try await sdl.protectionTestCurrentRange(t)
+            c.voltageRange = try await sdl.protectionTestVoltageRange(t)
+            c.start = try await sdl.protectionTest(t, .start)
+            c.step = try await sdl.protectionTest(t, .step)
+            c.stepDelay = try await sdl.protectionTest(t, .stepDelay)
+            c.end = try await sdl.protectionTest(t, .end)
+            c.min = try await sdl.protectionTest(t, .min)
+            c.max = try await sdl.protectionTest(t, .max)
+            c.voltage = try await sdl.protectionTest(t, .voltage)
+            if t == .opp { self.state.oppt = c } else { self.state.ocpt = c }
+        }
+    }
+
+    @discardableResult
+    public func applyProtectionTest(_ f: ActiveFunction, _ wanted: ProtectionTestConfig) async -> Bool {
+        let t = testKind(f)
+        let have = t == .opp ? state.oppt : state.ocpt
+        let ok = await perform("Write \(t.label)") { sdl in
+            if !(try await sdl.inProtectionTest(t)) {
+                if self.state.inputOn { try await sdl.setInput(false) }
+                try await sdl.enterProtectionTest(t)
+                self.state.function = f
+            }
+            if wanted.currentRange != have.currentRange { try await sdl.setProtectionTestCurrentRange(t, wanted.currentRange) }
+            if wanted.voltageRange != have.voltageRange { try await sdl.setProtectionTestVoltageRange(t, wanted.voltageRange) }
+            let pre = ":\(t.rawValue):"
+            // start ≤ end and min ≤ max are kept by clamping on the instrument: order matters.
+            try await sdl.writePair(lo: (pre + "STAR", wanted.start, have.start), hi: (pre + "END", wanted.end, have.end))
+            try await sdl.writePair(lo: (pre + "MIN", wanted.min, have.min), hi: (pre + "MAX", wanted.max, have.max))
+            let rest: [(SDL1000X.ProtectionParam, Double, Double)] = [
+                (.step, wanted.step, have.step), (.stepDelay, wanted.stepDelay, have.stepDelay), (.voltage, wanted.voltage, have.voltage)]
+            for (p, w, h) in rest where !approx(w, h) { try await sdl.setProtectionTest(t, p, w) }
+        }
+        await loadProtectionTest(f)
+        return ok && lastError == nil
+    }
+
+    // Ext
+
+    public func setExternal(mode: ExternalMode? = nil, currentRange: CurrentRange? = nil, voltageRange: VoltageRange? = nil) async {
+        await perform("External control") { sdl in
+            if let m = mode {
+                if self.state.inputOn { try await sdl.setInput(false); self.state.inputOn = false }
+                try await sdl.setExternalMode(m)
+            }
+            if let r = currentRange { try await sdl.setExternalCurrentRange(r) }
+            if let r = voltageRange { try await sdl.setExternalVoltageRange(r) }
+            self.state.externalMode = try await sdl.externalMode()
+            self.state.extCurrentRange = try await sdl.externalCurrentRange()
+            self.state.extVoltageRange = try await sdl.externalVoltageRange()
+            self.state.function = try await self.readFunctionPublic()
+        }
+    }
+
+    public func setExtInputSwitch(_ on: Bool) async {
+        await perform("External on/off") { sdl in
+            try await sdl.setExtInputSwitch(on)
+            self.state.extInputSwitch = try await sdl.extInputSwitch()
+        }
+    }
+
+    /// Reads the rear-panel control voltage (call periodically while the Ext screen shows).
+    public func refreshExtControlVoltage() async {
+        guard link == .connected else { return }
+        state.extControlVoltage = try? await sdl.measureExternal()
+    }
+
+    // Running
+
+    public enum SequenceStartError: Error, Equatable, CustomStringConvertible {
+        case notConnected, busy, wrongFunction(ActiveFunction), invalid([String]), didNotStart
+        public var description: String {
+            switch self {
+            case .notConnected: "Not connected"
+            case .busy: "Another run is in progress"
+            case .wrongFunction(let f): "The instrument isn't in \(f.label)"
+            case .invalid(let p): p.joined(separator: " ")
+            case .didNotStart: "The instrument did not start (input stayed off)"
+            }
+        }
+    }
+
+    /// Starts the instrument's own List / Program / OCPT / OPPT run. List and Program are
+    /// armed by input ON and started by a bus trigger (measured: `*TRG` is ignored with the
+    /// MANUAL source, so the source is switched to BUS for the run and restored after).
+    /// OCPT/OPPT start at input ON and are sampled fast to catch the trip point.
+    public func startSequence(_ f: ActiveFunction) async throws {
+        guard link == .connected else { throw SequenceStartError.notConnected }
+        guard recorder?.isActive != true, sequence?.phase != .running else { throw SequenceStartError.busy }
+        guard state.function == f || (f == .ocpt && state.function == .ocpt) || (f == .oppt && state.function == .oppt) else {
+            throw SequenceStartError.wrongFunction(f)
+        }
+        if state.inputOn { await setInput(false) }
+        var run = SequenceRun(function: f)
+        sequenceEpoch += 1
+        defer { sequenceEpoch += 1 }
+        do {
+            switch f {
+            case .list, .program:
+                let src = try await sdl.triggerSource()
+                if src != .bus {
+                    run.savedTriggerSource = src
+                    try await sdl.setTriggerSource(.bus)
+                    state.triggerSource = .bus
+                }
+                try await sdl.setInput(true)
+                state.inputOn = true
+                sequence = run
+                try await sdl.trigger()
+            case .ocpt, .oppt:
+                pollInterval = .milliseconds(50)
+                sequence = run
+                try await sdl.setInput(true)
+                state.inputOn = true
+            default:
+                throw SequenceStartError.wrongFunction(f)
+            }
+        } catch {
+            sequence = run
+            await finishSequence(.stopped)
+            lastError = "Start: \(error)"
+            throw error
+        }
+    }
+
+    /// Ends the sequence: puts the trigger source back and collects results.
+    func finishSequence(_ phase: SequenceRun.Phase) async {
+        guard var run = sequence, run.phase == .running, !sequenceFinishing else { return }
+        sequenceFinishing = true
+        defer { sequenceFinishing = false }
+        run.ended = Date()
+        pollInterval = recorder?.isActive == true ? pollInterval : idlePollInterval
+        if (try? await sdl.inputOn()) == true { try? await sdl.setInput(false) }
+        state.inputOn = (try? await sdl.inputOn()) ?? false
+        switch run.function {
+        case .program:
+            var results: [ProgramResult] = []
+            for (i, st) in state.program.steps.enumerated() {
+                guard let raw = try? await sdl.programResult(i + 1), let v = SCPIParse.double(raw) else { continue }
+                results.append(ProgramResult(step: i + 1, value: v, min: st.min, max: st.max, unit: st.measuredQuantity.unit))
+            }
+            run.programResults = results
+        case .ocpt, .oppt:
+            let c = run.function == .oppt ? state.oppt : state.ocpt
+            run.protectionResult = ProtectionResult.analyse(trace: run.trace, config: c, isPower: run.function == .oppt)
+        case .list:
+            run.step = (try? await sdl.testStep()) ?? run.step
+        default: break
+        }
+        if let src = run.savedTriggerSource {
+            try? await sdl.setTriggerSource(src)
+            state.triggerSource = (try? await sdl.triggerSource()) ?? state.triggerSource
+        }
+        // Readings taken while results were collected belong to the run too.
+        if let live = sequence { run.trace = live.trace }
+        run.phase = phase           // finished only once results and the trigger source are settled
+        sequence = run
+    }
+
+    public func stopSequence() async {
+        await setInput(false)
+        if sequence?.phase == .running { await finishSequence(.stopped) }
+    }
+
+    public func dismissSequence() { if sequence?.phase != .running { sequence = nil } }
 }
 
 extension Comparable {

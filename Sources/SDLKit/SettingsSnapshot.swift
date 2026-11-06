@@ -152,7 +152,17 @@ public struct SettingsSnapshot: Sendable, Codable {
     /// Only settings that differ are written (each SDL write takes ~200 ms). Forces input OFF.
     public func restore(to sdl: SDL1000X) async throws {
         if try await sdl.inputOn() { try await sdl.setInput(false) }
-        let changed = Set(try await diff(against: sdl).map(\.0))
+        // Some pairs are kept ordered by clamping (min ≤ max, start ≤ end), so one pass in a
+        // fixed order can leave a value clamped; repeat until a re-read matches (≤ 3 passes).
+        for _ in 0..<3 {
+            let changed = Set(try await diff(against: sdl).map(\.0))
+            if changed.isEmpty { break }
+            try await writePass(changed, to: sdl)
+        }
+        try await reenterFunction(sdl)
+    }
+
+    private func writePass(_ changed: Set<Entry>, to sdl: SDL1000X) async throws {
         // Ranges first: levels are clamped to the active range.
         func rank(_ e: Entry) -> Int { e.setHeader.contains("RANG") ? 0 : 1 }
         let ordered = values.filter { changed.contains($0.key) && $0.key.query != ":FUNC?" }
@@ -177,6 +187,9 @@ public struct SettingsSnapshot: Sendable, Codable {
                 try await sdl.setProgramStep(i + 1, step, full: true)
             }
         }
+    }
+
+    private func reenterFunction(_ sdl: SDL1000X) async throws {
         switch activeFunction {
         case .basic:
             if let f = values[Entry(":FUNC?", ":FUNC")] { try await sdl.write(":FUNC \(f)") }

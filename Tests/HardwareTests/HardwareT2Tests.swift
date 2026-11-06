@@ -64,8 +64,16 @@ struct HardwareT2Tests {
             try await Task.sleep(for: .milliseconds(600))
             try await body(s, psu)
         } catch { bodyError = error }
-        // Teardown always runs, in safety order.
-        try? await s.sdl.setInput(false)
+        // Teardown always runs, in safety order. If the session can't reach the instrument
+        // (e.g. a test broke its link), drop it and switch the input off on a fresh connection.
+        if (try? await s.sdl.setInput(false)) == nil {
+            await s.disconnect()
+            let fresh = SDL1000X(host: hwHost!)
+            try? await fresh.connection.connect()
+            try? await fresh.setInput(false)
+            await fresh.connection.disconnect()
+            await s.connect()
+        }
         try? await psu.output(false)
         #expect((try? await psu.outputOn()) == false, "PSU output 2 did not switch off!")
         if let snap {
@@ -402,10 +410,160 @@ struct HardwareT2Tests {
             await settle(500)
             let after = try await psu.current()
             print("T2 link drop: before \(before) A, after \(after) A, ended in \(took), reason \(String(describing: r.info.endReason))")
+            if r.isActive {
+                print("T2 link drop: link now \(s.link)")
+                for e in s.log where e.kind == .info || e.kind == .error || e.text.contains("IDN") || e.text.contains("INP") {
+                    print(String(format: "LOG %+.3f", e.date.timeIntervalSince(r.info.startedAt)), e.kind, e.text)
+                }
+            }
             #expect(near(before, 0.4, 0.02))
             #expect(!r.isActive && r.info.endReason == .connectionLost)
             #expect(after < 0.01)
         }
         try? FileManager.default.removeItem(at: store.root)
+    }
+
+    // MARK: - Phase 6: List / Program / OCPT / OPPT / Ext
+
+    func waitFor(_ seconds: Double, _ cond: () -> Bool) async -> Bool {
+        let end = ContinuousClock.now + .milliseconds(Int(seconds * 1000))
+        while ContinuousClock.now < end { if cond() { return true }; try? await Task.sleep(for: .milliseconds(100)) }
+        return cond()
+    }
+
+    @Test func listRunsOnSupply() async throws {
+        try await withRig(volts: 5, amps: 0.8) { s, psu in
+            let srcBefore = s.state.triggerSource
+            await s.enterFunction(.list)
+            try #require(s.state.function == .list)
+            await s.loadList()
+            var c = s.state.list
+            c.mode = .cc; c.currentRange = .low; c.voltageRange = .low; c.count = 2
+            c.steps = [ListStep(level: 0.1, width: 1), ListStep(level: 0.3, width: 1), ListStep(level: 0.5, width: 1)]
+            #expect(await s.applyList(c))
+            #expect(s.state.list.steps.count == 3 && abs(s.state.list.steps[2].level - 0.5) < 1e-6)
+            s.clearHistory()
+            try await s.startSequence(.list)
+            var psuMax = 0.0
+            for _ in 0..<40 where s.sequence?.phase == .running {
+                psuMax = max(psuMax, (try? await psu.current()) ?? 0)
+                try await Task.sleep(for: .milliseconds(250))
+            }
+            #expect(await waitFor(5) { s.sequence?.phase == .finished })
+            let currents = s.history.samples.map(\.current)
+            print("T2 list: phase \(String(describing: s.sequence?.phase)) step \(String(describing: s.sequence?.step)) psuMax \(psuMax) samples \(currents.count)")
+            #expect(s.sequence?.step == 4)
+            #expect(near(psuMax, 0.5, 0.02))
+            #expect(currents.contains { near($0, 0.1, 0.01) } && currents.contains { near($0, 0.3, 0.01) })
+            #expect(s.state.triggerSource == srcBefore)
+            #expect(try await s.sdl.triggerSource() == srcBefore)
+            #expect(try await psu.current() < 0.01)
+        }
+    }
+
+    @Test func programRunsAndJudgesOnSupply() async throws {
+        // 0.5 A supply limit: the CV step pulls the supply into its limit, so it measures ~0.5 A.
+        try await withRig(volts: 5, amps: 0.5) { s, psu in
+            await s.enterFunction(.program)
+            await s.loadProgram()
+            var a = ProgramStep()
+            a.mode = .cc; a.currentRange = .low; a.voltageRange = .low; a.level = 0.2
+            a.timeOn = 1; a.timeOff = 0.5; a.timeDelay = 0.5; a.min = 4.5; a.max = 5.5
+            var b = a; b.level = 0.4; b.min = 4.0; b.max = 4.5            // expected to fail (≈ 4.97 V)
+            var cv = a; cv.mode = .cv; cv.level = 4.0; cv.min = 0.45; cv.max = 0.55
+            var c = s.state.program; c.steps = [a, b, cv]; c.stopOnFail = false
+            #expect(await s.applyProgram(c))
+            #expect(s.state.program.steps.count == 3 && s.state.program.steps[2].mode == .cv)
+            try await s.startSequence(.program)
+            #expect(await waitFor(15) { s.sequence?.phase == .finished })
+            let r = s.sequence?.programResults ?? []
+            if r.count != 3 {
+                let t0 = s.sequence?.started ?? Date()
+                for e in s.log where e.date > t0.addingTimeInterval(-40) && !e.text.hasPrefix("MEAS") {
+                    print(String(format: "LOG %+.3f", e.date.timeIntervalSince(t0)), e.kind, e.text)
+                }
+            }
+            print("T2 program: " + r.map { "step \($0.step) \($0.value) \($0.unit) \($0.passed ? "PASS" : "FAIL")" }.joined(separator: "; "))
+            #expect(r.count == 3)
+            if r.count == 3 {
+                #expect(r[0].passed && near(r[0].value, 4.98, 0.03))
+                #expect(!r[1].passed)
+                #expect(r[2].unit == "A" && near(r[2].value, 0.5, 0.03), "CV step should report current")
+            }
+            #expect(try await psu.current() < 0.01)
+        }
+    }
+
+    /// The supply's 0.5 A limit plays the DUT's over-current protection.
+    @Test func ocptTripsAtSupplyLimit() async throws {
+        try await withRig(volts: 5, amps: 0.5) { s, psu in
+            await s.enterFunction(.ocpt)
+            await s.loadProtectionTest(.ocpt)
+            var c = s.state.ocpt
+            c.currentRange = .low; c.voltageRange = .low
+            // 4.5 V: the supply in its current limit doesn't always collapse cleanly (it can sit at
+            // ~4.1–4.4 V oscillating with the load), so trip on the first clear sag.
+            c.start = 0.1; c.step = 0.05; c.stepDelay = 0.3; c.end = 0.8; c.min = 0.4; c.max = 0.6; c.voltage = 4.5
+            #expect(await s.applyProtectionTest(.ocpt, c))
+            try await s.startSequence(.ocpt)
+            #expect(await waitFor(10) { s.sequence?.phase == .finished })
+            let r = try #require(s.sequence?.protectionResult)
+            print("T2 OCPT: \(r.summary) pass \(r.passed) trace \(s.sequence?.trace.count ?? 0)")
+            #expect(r.tripped && r.passed)
+            #expect(near(r.value ?? 0, 0.475, 0.05))
+            #expect(try await psu.current() < 0.01)
+        }
+    }
+
+    @Test func ocptWithoutTripOnSupply() async throws {
+        try await withRig(volts: 5, amps: 0.5) { s, _ in
+            await s.enterFunction(.ocpt)
+            await s.loadProtectionTest(.ocpt)
+            var c = s.state.ocpt
+            c.currentRange = .low; c.start = 0.1; c.step = 0.1; c.stepDelay = 0.3; c.end = 0.3; c.min = 0.4; c.max = 0.6; c.voltage = 3
+            await s.applyProtectionTest(.ocpt, c)
+            try await s.startSequence(.ocpt)
+            #expect(await waitFor(8) { s.sequence?.phase == .finished })
+            let r = try #require(s.sequence?.protectionResult)
+            print("T2 OCPT no-trip: \(r.summary)")
+            if let run = s.sequence {
+                for m in run.trace { print(String(format: "TRACE %.3f V=%.4f I=%.4f", m.date.timeIntervalSince(run.started), m.voltage, m.current)) }
+                print("ENDED", run.ended.map { $0.timeIntervalSince(run.started) } ?? -1)
+            }
+            #expect(!r.tripped && !r.passed)
+        }
+    }
+
+    @Test func opptTripsAtSupplyLimit() async throws {
+        try await withRig(volts: 5, amps: 0.5) { s, psu in
+            await s.enterFunction(.oppt)
+            #expect(s.state.function == .oppt)
+            await s.loadProtectionTest(.oppt)
+            var c = s.state.oppt
+            c.currentRange = .low; c.voltageRange = .low
+            c.start = 0.5; c.step = 0.25; c.stepDelay = 0.3; c.end = 3.5; c.min = 2.0; c.max = 3.0; c.voltage = 4.5
+            await s.applyProtectionTest(.oppt, c)
+            try await s.startSequence(.oppt)
+            #expect(await waitFor(10) { s.sequence?.phase == .finished })
+            let r = try #require(s.sequence?.protectionResult)
+            print("T2 OPPT: \(r.summary) pass \(r.passed)")
+            #expect(r.tripped && r.passed && r.unit == "W")
+            #expect(try await psu.current() < 0.01)
+        }
+    }
+
+    /// Ext: settings only (no control voltage on this bench; the input stays off).
+    @Test func extSettingsReadBack() async throws {
+        try await withRig(volts: 5, amps: 0.5) { s, _ in
+            await s.setExternal(mode: .externalCurrent, currentRange: .low, voltageRange: .low)
+            #expect(s.state.externalMode == .externalCurrent && s.state.function == .ext)
+            #expect(s.state.extCurrentRange == .low && s.state.extVoltageRange == .low)
+            await s.refreshExtControlVoltage()
+            print("T2 ext: control voltage \(String(describing: s.state.extControlVoltage)) input \(s.state.inputOn)")
+            #expect(s.state.extControlVoltage != nil)
+            #expect(!s.state.inputOn)
+            await s.enterFunction(.basic)
+            #expect(s.state.externalMode == .internalControl && s.state.function == .basic)
+        }
     }
 }

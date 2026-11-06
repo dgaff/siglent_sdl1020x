@@ -313,8 +313,10 @@ public final class SDL1000X: Sendable {
         try await write(":PROG:TIME:ON \(n),\(fmt(s.timeOn))")
         try await write(":PROG:TIME:OFF \(n),\(fmt(s.timeOff))")
         try await write(":PROG:TIME:DEL \(n),\(fmt(s.timeDelay))")
+        // The SDL clamps min ≤ max as each is written: min, max, then min again.
         try await write(":PROG:MIN \(n),\(fmt(s.min))")
         try await write(":PROG:MAX \(n),\(fmt(s.max))")
+        try await write(":PROG:MIN \(n),\(fmt(s.min))")
         try await write(":PROG:LEV \(n),\(fmt(s.level))")
         if s.mode == .led || full {
             try await write(":PROG:LED:CURR \(n),\(fmt(s.ledCurrent))")
@@ -322,7 +324,42 @@ public final class SDL1000X: Sendable {
         }
     }
 
-    /// Test result for a Program step (raw string; format to be confirmed on hardware).
+    /// Writes only the fields of a Program step that differ from `old` (all fields when nil).
+    /// Program mode must be active.
+    public func setProgramStep(_ n: Int, _ s: ProgramStep, changedFrom old: ProgramStep?) async throws {
+        guard let o = old else { try await setProgramStep(n, s, full: true); return }
+        if s.mode != o.mode { try await write(":PROG:MODE \(n),\(s.mode.scpi)") }
+        if s.currentRange != o.currentRange { try await write(":PROG:IRANG \(n),\(fmt(s.currentRange.rawValue))") }
+        if s.voltageRange != o.voltageRange { try await write(":PROG:VRANG \(n),\(fmt(s.voltageRange.rawValue))") }
+        if s.resistanceRange != o.resistanceRange { try await write(":PROG:RRANG \(n),\(s.resistanceRange.rawValue)") }
+        if s.short != o.short { try await write(":PROG:SHOR \(n),\(s.short ? "ON" : "OFF")") }
+        if s.pause != o.pause { try await write(":PROG:PAUSE \(n),\(s.pause ? "ON" : "OFF")") }
+        if !approx(s.timeOn, o.timeOn) { try await write(":PROG:TIME:ON \(n),\(fmt(s.timeOn))") }
+        if !approx(s.timeOff, o.timeOff) { try await write(":PROG:TIME:OFF \(n),\(fmt(s.timeOff))") }
+        if !approx(s.timeDelay, o.timeDelay) { try await write(":PROG:TIME:DEL \(n),\(fmt(s.timeDelay))") }
+        try await writePair(lo: (":PROG:MIN \(n),", s.min, o.min), hi: (":PROG:MAX \(n),", s.max, o.max))
+        if !approx(s.level, o.level) { try await write(":PROG:LEV \(n),\(fmt(s.level))") }
+        if !approx(s.ledCurrent, o.ledCurrent) { try await write(":PROG:LED:CURR \(n),\(fmt(s.ledCurrent))") }
+        if !approx(s.ledRco, o.ledRco) { try await write(":PROG:LED:RCONF \(n),\(fmt(s.ledRco))") }
+    }
+
+    /// Writes a (low, high) pair the instrument keeps ordered by clamping (Program and
+    /// OCPT/OPPT min/max, OCPT/OPPT start/end; measured). Raising the low value above the old
+    /// high one needs the high one written first; otherwise low first.
+    public func writePair(lo: (header: String, new: Double, old: Double), hi: (header: String, new: Double, old: Double)) async throws {
+        let loChanged = !approx(lo.new, lo.old), hiChanged = !approx(hi.new, hi.old)
+        func sep(_ h: String) -> String { h.hasSuffix(",") ? h : h + " " }
+        if lo.new > hi.old {
+            if hiChanged { try await write(sep(hi.header) + fmt(hi.new)) }
+            if loChanged { try await write(sep(lo.header) + fmt(lo.new)) }
+        } else {
+            if loChanged { try await write(sep(lo.header) + fmt(lo.new)) }
+            if hiChanged { try await write(sep(hi.header) + fmt(hi.new)) }
+        }
+    }
+
+    /// Measured value the instrument judged a Program step by (voltage, or current for CV).
+    /// A plain number; there is no pass/fail flag (measured on hardware).
     public func programResult(_ n: Int) async throws -> String { try await query(":PROG:TEST? \(n)") }
 
     // MARK: - Utility / protection / system

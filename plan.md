@@ -311,3 +311,32 @@ I'll also `git init` the project at Phase 0, so every phase lands as reviewable 
   loops, over-current, unexpected input-off, dropped link, refused start, interrupted run). Hardware T2: 13/13 pass,
   including three new Phase 5 tests (failsafe with app disconnected, full profile on the supply, link drop).
 - **Next:** Phase 6, the List, Program, OCPT/OPPT and Ext screens.
+
+### 2026-11-06: Phase 6 done
+- **List screen:** mode/ranges/repeat count, editable step table (level, width, slew), add/delete, CSV import/export,
+  cycle/total time, Send (writes only what changed, then reads back) / Revert, Run/Stop with the executing step marked.
+- **Program screen:** step table with results (measured value + PASS/FAIL), inspector for the selected step (mode, level
+  or LED Vo/Io/Rco, short, ranges, on/off/measure-delay, pause, pass window), stop-on-fail, CSV import/export, Run/Stop,
+  pass/fail summary.
+- **OCPT / OPPT screen:** ranges, ramp (start/step/delay/end), trip voltage, pass window; Run/Stop; result (trip value,
+  PASS/FAIL) with current-or-power and voltage traces from fast sampling.
+- **Ext screen:** control mode (off / external CC / external CV), ranges, live control voltage, rear-panel on/off switch.
+- **Run semantics measured on hardware** and modelled in the simulator (arming, BUS trigger, end-of-run input off,
+  step numbers, Program results, OCPT/OPPT ramp and trip) — see hardware-notes.
+- **Fixes found on hardware:**
+  - Blank-line replies after `SYST:ERR?` misaligned the connection (reader now skips them).
+  - Clamped min/max and start/end pairs: ordered writes in the app; snapshot restore repeats until it reads back clean.
+  - Toolbar Trigger disabled unless the trigger source is BUS (it was silently ignored under MANUAL).
+  - A status reading straddling the app's own input change is ignored for sequences too (as for profiles).
+  - **Reconnect could orphan the new socket** (a late close event from the old one), leaving LoadLab unable to
+    reconnect while the instrument kept its input on. Found when a full hardware run left the input on after the
+    link-drop test; fixed and covered by a simulator test that fails on the old code. Test teardown now switches the
+    input off over a fresh connection if needed.
+  - OCPT/OPPT runs that never end (source oscillating in its limit rather than collapsing) are stopped by LoadLab
+    3 s past the ramp's longest possible time, with a note in the result.
+- **Deviation:** List/Program/OCPT runs are shown live (and on the live chart) but not saved to the run library; the
+  step tables export as CSV.
+- **Tests:** 79 simulator/unit tests (15 new: sequences, CSV, trip analysis, pair ordering, reconnect, OCPT stall). Hardware T2: 6 new
+  tests (List on supply, Program incl. a CV step, OCPT trip and no-trip, OPPT trip, Ext settings). Full hardware
+  regression (T1 7 + T2 19): 25/26 passed, the OCPT stall above; after the fix OCPT/OPPT passed 3/3 repeats.
+- **Next:** Phase 7, polish plus the real-battery test (§8).

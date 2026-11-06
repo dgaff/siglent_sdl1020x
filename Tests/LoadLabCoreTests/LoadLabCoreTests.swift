@@ -141,3 +141,28 @@ import SDLSimulator
         #expect(recent.count == 101)
     }
 }
+
+/// Regression (hardware): after a dropped connection, a late close event from the old socket
+/// could orphan the new one, which then held the instrument's only client slot.
+@MainActor @Suite(.serialized) struct ReconnectTests {
+    @Test func repeatedDropsLeaveExactlyOneClient() async throws {
+        let sim = SDLSimulator()
+        try await sim.start(); defer { sim.stop() }
+        sim.sourceVoltage = 5
+        let s = DeviceSession(host: "127.0.0.1", port: sim.port)
+        s.pollInterval = .milliseconds(20)
+        s.idlePollInterval = .milliseconds(20)
+        await s.connect()
+        for k in 0..<15 {
+            sim.dropClients()
+            let end = ContinuousClock.now + .seconds(10)
+            try await Task.sleep(for: .milliseconds(30))
+            while ContinuousClock.now < end, s.link != .connected { try await Task.sleep(for: .milliseconds(20)) }
+            #expect(s.link == .connected, "round \(k): \(s.link)")
+            try await Task.sleep(for: .milliseconds(Int.random(in: 0...120)))
+            #expect(sim.clientCount == 1, "round \(k): \(sim.clientCount) clients")
+            #expect((try? await s.sdl.inputOn()) != nil, "round \(k): session can't talk")
+        }
+        await s.disconnect()
+    }
+}

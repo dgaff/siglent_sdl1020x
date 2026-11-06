@@ -78,6 +78,9 @@ public actor SCPIConnection {
 
     public func connect(timeout: Duration = .seconds(3)) async throws {
         if isConnected { return }
+        // Never leave an old socket open behind a new one: the SDL allows one client, and an
+        // orphaned connection would make every later attempt look "busy".
+        if let old = connection { old.stateUpdateHandler = nil; old.cancel(); connection = nil }
         let params = NWParameters.tcp
         if let tcp = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcp.noDelay = true
@@ -97,7 +100,7 @@ public actor SCPIConnection {
                     once.resume(.success(()))
                 case .failed(let err):
                     once.resume(.failure(SCPIError.connectFailed(err.localizedDescription)))
-                    Task { await self?.handleClosed() }
+                    Task { await self?.handleClosed(conn) }
                 case .waiting(let err):
                     // Host unreachable / refused / blocked: fail fast rather than waiting forever.
                     if conn.currentPath?.unsatisfiedReason == .localNetworkDenied || err == .posix(.ENETDOWN) {
@@ -107,7 +110,7 @@ public actor SCPIConnection {
                     }
                 case .cancelled:
                     once.resume(.failure(SCPIError.connectionClosed))
-                    Task { await self?.handleClosed() }
+                    Task { await self?.handleClosed(conn) }
                 default: break
                 }
             }
@@ -118,17 +121,22 @@ public actor SCPIConnection {
         }
         isConnected = true
         log(.info, "Connected to \(host):\(port)")
-        receiveNext()
+        receiveNext(conn)
     }
 
     public func disconnect() {
-        connection?.stateUpdateHandler = nil
-        connection?.cancel()
+        let c = connection
+        c?.stateUpdateHandler = nil
+        c?.cancel()
+        handleClosed(c)
         connection = nil
-        handleClosed()
     }
 
-    private func handleClosed() {
+    /// Marks the session closed, but only for the connection the event came from: a late
+    /// callback from an earlier socket must not close a newer one (seen on hardware after a
+    /// reconnect: the new socket was orphaned and held the instrument's only client slot).
+    private func handleClosed(_ from: NWConnection?) {
+        guard let from, from === connection else { return }
         guard isConnected || connection != nil else { return }
         isConnected = false
         connection = nil
@@ -297,20 +305,25 @@ public actor SCPIConnection {
         w.cont.resume(throwing: SCPIError.timeout(command: ""))
     }
 
-    private func receiveNext() {
-        guard let conn = connection else { return }
+    private func receiveNext(_ conn: NWConnection) {
+        guard conn === connection else { return }
         conn.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            Task { await self?.handleReceive(data: data, isComplete: isComplete, error: error) }
+            Task { await self?.handleReceive(conn, data: data, isComplete: isComplete, error: error) }
         }
     }
 
-    private func handleReceive(data: Data?, isComplete: Bool, error: NWError?) {
+    private func handleReceive(_ conn: NWConnection, data: Data?, isComplete: Bool, error: NWError?) {
+        // Data from a socket that has since been replaced is stale.
+        guard conn === connection else { return }
         if let data, !data.isEmpty {
             buffer.append(data)
             while let nl = buffer.firstIndex(of: 0x0A) {
                 var lineData = buffer[buffer.startIndex..<nl]
                 if lineData.last == 0x0D { lineData = lineData.dropLast() }
                 buffer.removeSubrange(buffer.startIndex...nl)
+                // The SDL ends error-queue replies with "\n\n"; no reply is ever empty, so a blank
+                // line is that extra terminator. Taking it as a reply misaligns every later query.
+                if lineData.isEmpty { continue }
                 let line = String(decoding: lineData, as: UTF8.self)
                 consecutiveTimeouts = 0
                 linesReceived += 1
@@ -323,10 +336,10 @@ public actor SCPIConnection {
             }
         }
         if isComplete || error != nil {
-            handleClosed()
+            handleClosed(conn)
             return
         }
-        receiveNext()
+        receiveNext(conn)
     }
 
     private func lock() async {

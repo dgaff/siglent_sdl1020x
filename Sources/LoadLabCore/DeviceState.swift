@@ -74,6 +74,16 @@ public struct DeviceState: Equatable, Sendable {
     public var currentMonitor = false
     public var voltageMonitor = false
     public var externalMode: ExternalMode = .internalControl
+    public var extCurrentRange: CurrentRange = .high
+    public var extVoltageRange: VoltageRange = .high
+    /// Rear-panel control voltage (MEAS:EXT?), read while the Ext screen is open.
+    public var extControlVoltage: Double?
+
+    // List / Program / OCPT / OPPT (loaded on demand by their screens: they're many queries)
+    public var list = ListConfig()
+    public var program = ProgramConfig()
+    public var ocpt = ProtectionTestConfig()
+    public var oppt = ProtectionTestConfig()
 
     public init() {}
 

@@ -98,3 +98,51 @@ must set latch OFF explicitly and verify by read-back before switching the input
   Judging that stale "off" against the new "should be on" ended every hardware run at once. Status readings are now
   ignored if the runner changed the input while they were taken (`inputGeneration`). The simulator is too fast to
   hit this reliably; the hardware test `profileRunOnSupply` failed every time without the fix.
+
+## List / Program / OCPT / OPPT runs (Phase 6) — measured with the E36234A as source, 2026-11-06
+- **Remote triggers need `TRIG:SOUR BUS`.** With the MANUAL source (this unit's setting) `*TRG` is silently ignored.
+  LoadLab switches the source to BUS for a List/Program run and restores it afterwards; the toolbar Trigger button is
+  disabled unless the source is BUS.
+- **List:** input ON *arms* the list (`:TEST:STEP?` = 0, no current). The trigger starts it; steps follow their widths
+  (1 s widths observed at 0.1/0.3/0.5 A) and the list repeats `COUNt` times. At the end the instrument **switches the
+  input off** and `:TEST:STEP?` reads steps + 1 (4 for 3 steps). Re-arm by switching the input on again.
+- **Program:** same arming and trigger. Each step loads for Ton, then Toff with no load; after the last step's Ton the
+  input switches off. **`:PROG:TEST? n` returns the measured value** (a plain number, kept until the next run), not
+  pass/fail: voltage for CC/CP/CR steps, **current for CV steps** (CV 4 V against a supply limited to 0.5 A → 0.514 A).
+  LoadLab judges it against the step's min/max.
+- **`:TEST:STOP?` always reads 0** (during, after and between runs): it can't be used to detect the end. LoadLab uses the
+  input switching off.
+- **OCPT/OPPT start at input ON** (no trigger). The level rises by Step every Step delay; when the source voltage falls
+  below the trip voltage the instrument switches the input off. **The ramp stops before applying the End level**
+  (Start 0.1, Step 0.1, End 0.3: only 0.1 and 0.2 A were applied). **The trip point is not readable over SCPI**
+  (`:OCP:RES?`, `:OCP:TEST?`, `:OCP:RESULT?`, `:OCP:CURR?`, `:OCP:TRIP?` are all undefined), so LoadLab samples V/I
+  every ~50 ms and reports the highest load held above the trip voltage: OCPT tripped at ≈ 0.50 A and OPPT at ≈ 2.5 W
+  against the supply's 0.5 A limit at 5 V.
+- **Clamped pairs:** Program and OCPT/OPPT **min ≤ max** and OCPT/OPPT **start ≤ end** are enforced by clamping the value
+  being written (e.g. MIN 1 while MAX is 0.55 stores 0.55). Writes must be ordered (raise max before min); snapshot
+  restore now repeats until a re-read matches.
+- **Ext:** `EXT:MODE EXTI/EXTV` selects external control (`EXT:MODE?` ≠ INT is how LoadLab detects the Ext function);
+  `MEAS:EXT?` reads the control voltage (0.0000 V with nothing connected). Sinking under external control was not tested
+  (no control voltage on this bench).
+
+## Transport: error-queue replies end with two newlines
+- `SYST:ERR?` replies for real errors are terminated `\n\n` (e.g. `-113,Undefined header,:OCP:RES?\n\n`); `+0, No error`
+  has one `\n`. The extra blank line used to be taken as the next reply, misaligning every later query on that
+  connection (seen as "Unexpected reply to :INP?: -113,…" right after connecting). The reader now skips blank lines;
+  the simulator mimics the quirk.
+
+## Transport: reconnect could orphan the new socket (fixed 2026-11-06)
+- Seen once in a full hardware run: after a deliberate mid-profile disconnect, LoadLab never reconnected and the input
+  stayed on at 0.4 A (the Von backstop was armed; the test's supply was then switched off by teardown).
+- Cause: the old socket's final receive/close callback is delivered asynchronously. When it landed after the reconnect
+  had opened a new socket, it marked the *new* one closed without cancelling it. That orphaned socket kept the SDL's
+  single client slot, so every further attempt was accepted-then-closed ("busy"), indefinitely.
+- Fix: close and receive events only act on the socket they came from; `connect()` cancels any leftover socket first.
+  Simulator test `repeatedDropsLeaveExactlyOneClient` fails 3/3 on the old code and passes on the fix.
+- Hardware tests' teardown now falls back to a fresh connection to switch the input off if the session can't.
+
+## OCPT against a current-limited supply: no clean collapse sometimes
+- In 1 of ~8 runs the E36234A in its 0.5 A limit and the SDL's CC loop settled into an oscillation (4.1–4.4 V,
+  0.40–0.48 A) instead of the voltage collapsing, so the 3 V trip threshold was never crossed and the instrument neither
+  tripped nor ended the ramp. LoadLab now stops an OCPT/OPPT run 3 s past the ramp's longest possible duration and says
+  why. The hardware tests trip at 4.5 V (first clear sag); a real DUT's protection normally cuts its output fully.

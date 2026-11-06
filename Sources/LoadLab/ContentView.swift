@@ -64,6 +64,36 @@ struct ContentView: View {
                     try? await s.startBatteryRun(config: c, cell: cell, options: o)
                     app.selectedFunction = .battery
                 }
+                // Test hook: run a List / Program / OCPT demo on the simulator.
+                if let which = ProcessInfo.processInfo.environment["LOADLAB_DEMO_SEQ"],
+                   let s = app.session, s.identity?.serial.hasPrefix("SIM") == true {
+                    _ = await s.raw("SIM:SOURCE:ILIM 0.5")
+                    switch which {
+                    case "list":
+                        await s.enterFunction(.list); await s.loadList()
+                        var c = s.state.list; c.mode = .cc; c.currentRange = .low; c.count = 3
+                        c.steps = [ListStep(level: 0.1, width: 2), ListStep(level: 0.3, width: 2), ListStep(level: 0.45, width: 2)]
+                        await s.applyList(c)
+                        app.selectedFunction = .list
+                        try? await s.startSequence(.list)
+                    case "program":
+                        await s.enterFunction(.program); await s.loadProgram()
+                        var a = ProgramStep(); a.mode = .cc; a.currentRange = .low; a.voltageRange = .high; a.level = 0.2
+                        a.timeOn = 1; a.timeOff = 0.5; a.timeDelay = 0.5; a.min = 11.9; a.max = 12.1
+                        var b = a; b.level = 0.4; b.min = 11.99; b.max = 12.1
+                        var c = s.state.program; c.steps = [a, b, a]
+                        await s.applyProgram(c)
+                        app.selectedFunction = .program
+                        try? await s.startSequence(.program)
+                    default:
+                        await s.enterFunction(.ocpt); await s.loadProtectionTest(.ocpt)
+                        var c = s.state.ocpt; c.currentRange = .low; c.voltageRange = .low
+                        c.start = 0.1; c.step = 0.05; c.stepDelay = 0.3; c.end = 0.8; c.min = 0.4; c.max = 0.6; c.voltage = 6
+                        await s.applyProtectionTest(.ocpt, c)
+                        app.selectedFunction = .ocpt
+                        try? await s.startSequence(.ocpt)
+                    }
+                }
                 // Test hook: a short HPPC-style profile on a simulated cell (simulator only).
                 if ProcessInfo.processInfo.environment["LOADLAB_DEMO_PROFILE"] == "1",
                    let s = app.session, s.identity?.serial.hasPrefix("SIM") == true {
@@ -104,7 +134,8 @@ struct ContentView: View {
                 Divider()
                 VSplitView {
                     functionPane(session)
-                        .frame(minHeight: 220)
+                        // List / Program / OCPT / Ext carry their own tables and run controls.
+                        .frame(minHeight: app.selectedFunction == .basic ? 220 : 450)
                     // The Battery screen is a long form plus its own run charts.
                     if chartVisible && app.selectedFunction != .battery {
                         LiveChartView(session: session)
@@ -120,10 +151,10 @@ struct ContentView: View {
         switch app.selectedFunction {
         case .basic: BasicPane(session: session)
         case .battery: BatteryPane(session: session)
-        case .list: ComingSoon(function: .list, phase: 6, session: session)
-        case .program: ComingSoon(function: .program, phase: 6, session: session)
-        case .ocpt, .oppt: ComingSoon(function: .ocpt, phase: 6, session: session)
-        case .ext: ComingSoon(function: .ext, phase: 6, session: session)
+        case .list: ListPane(session: session)
+        case .program: ProgramPane(session: session)
+        case .ocpt, .oppt: ProtectionTestPane(session: session)
+        case .ext: ExtPane(session: session)
         }
     }
 
@@ -135,19 +166,6 @@ struct ContentView: View {
                               : "Click Connect next to an instrument in the sidebar, or add one by IP.")
         } actions: {
             Button("Scan Network") { Task { await app.scan() } }.disabled(app.scanning)
-        }
-    }
-}
-
-private struct ComingSoon: View {
-    let function: ActiveFunction
-    let phase: Int
-    let session: DeviceSession
-    var body: some View {
-        ContentUnavailableView {
-            Label(function == .ocpt ? "OCPT / OPPT" : function.label, systemImage: function.symbol)
-        } description: {
-            Text("This screen arrives in Phase \(phase). The instrument is currently running: \(session.state.function.label).")
         }
     }
 }
