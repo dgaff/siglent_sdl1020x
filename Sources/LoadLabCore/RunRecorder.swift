@@ -97,6 +97,9 @@ public final class RunRecorder {
 
     public func setNotes(_ notes: String) { info.cell.notes = notes; save() }
 
+    /// Writes run.json and flushes samples now (e.g. before LoadLab disconnects or quits).
+    public func persist() { updateSummary(); save() }
+
     /// Records a profile's DC resistance measurement (saved straight away).
     public func addDCR(_ r: DCRResult) {
         info.dcrResults = (info.dcrResults ?? []) + [r]

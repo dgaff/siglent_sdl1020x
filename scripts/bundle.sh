@@ -9,6 +9,8 @@ APP=build/LoadLab.app
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/LoadLab"
+# App icon (regenerate with: swift scripts/make-icon.swift Resources/LoadLab.icns)
+cp Resources/LoadLab.icns "$APP/Contents/Resources/LoadLab.icns"
 VERSION="0.2.$(git rev-list --count HEAD 2>/dev/null || echo 0)"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -19,6 +21,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>LoadLab</string>
   <key>CFBundleIdentifier</key><string>local.loadlab.LoadLab</string>
   <key>CFBundleExecutable</key><string>LoadLab</string>
+  <key>CFBundleIconFile</key><string>LoadLab</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundleVersion</key><string>${VERSION}</string>

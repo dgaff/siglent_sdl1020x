@@ -173,4 +173,28 @@ import SDLSimulator
         #expect(stillRunning.isEmpty)
         await b.disconnect()
     }
+
+    /// Regression: a status check that read the input *before* the run switched it on used to
+    /// end the run on that stale "off" (seen with the simulator demo; profiles on hardware).
+    @Test func staleStatusDoesNotEndANewRun() async throws {
+        let sim = SDLSimulator()
+        try await sim.start(); defer { sim.stop() }
+        _ = sim.execute(line: "SIM:BATTERY 5000,4.2,3.0")
+        sim.queryCost = 0.04          // a status check (~8 queries) now spans ~1/3 of each second
+        let store = tempStore()
+        let s = await session(port: sim.port, store: store)
+        var early = 0
+        for k in 0..<6 {
+            try await Task.sleep(for: .milliseconds(137 * k % 900))
+            var c = ccConfig(0.5); c.stopVoltageEnabled = true; c.stopVoltage = 3.0
+            var o = RecordingOptions(); o.sampleRateHz = 10
+            try await s.startBatteryRun(config: c, cell: CellInfo(), options: o)
+            try await Task.sleep(for: .milliseconds(1500))
+            if s.recorder?.isActive != true { early += 1 }
+            await s.stopRun()
+            s.dismissRun()
+        }
+        #expect(early == 0, "\(early) of 6 runs ended on a stale status reading")
+        await s.disconnect()
+    }
 }

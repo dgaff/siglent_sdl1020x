@@ -166,3 +166,17 @@ import SDLSimulator
         await s.disconnect()
     }
 }
+
+@MainActor @Suite struct KnownDeviceTests {
+    @Test func newAddressForSameSerialMovesTheEntry() {
+        let defaults = UserDefaults(suiteName: "loadlab-test-\(UUID().uuidString)")!
+        let app = AppModel(defaults: defaults)
+        app.upsert(host: "192.168.1.10", model: "SDL1020X", serial: "SDL13GCXA00453")
+        app.upsert(host: "192.168.1.99")                                    // added by IP, not identified yet
+        app.upsert(host: "192.168.1.99", model: "SDL1020X", serial: "SDL13GCXA00453")
+        #expect(app.devices.count == 1)
+        #expect(app.devices.first?.host == "192.168.1.99")
+        app.upsert(host: "192.168.1.20", model: "SDL1030X", serial: "OTHER")
+        #expect(app.devices.count == 2)
+    }
+}

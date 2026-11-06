@@ -32,6 +32,11 @@ public final class AppModel {
     /// (library and profiles work without a connection).
     public enum Page: Hashable, Sendable { case function, library, profiles }
     public var page: Page = .function
+    /// The instrument settings sheet (also opened with ⌘,).
+    public var showingInstrumentSettings = false
+
+    /// Navigates the sidebar (menu shortcuts use this).
+    public func go(_ f: ActiveFunction) { selectedFunction = f; page = .function }
     public var showingLibrary: Bool {
         get { page == .library }
         set { page = newValue ? .library : .function }
@@ -74,6 +79,15 @@ public final class AppModel {
     }
 
     public func upsert(host: String, port: UInt16 = 5025, model: String? = nil, serial: String? = nil, busy: Bool = false) {
+        // Same instrument at a new address (e.g. a new DHCP lease): move the entry, don't duplicate it.
+        if let serial, let i = devices.firstIndex(where: { $0.serial == serial }),
+           devices[i].host != host || devices[i].port != port {
+            var moved = devices.remove(at: i)
+            devices.removeAll { $0.host == host && $0.port == port }     // an unidentified entry at the new address
+            moved.host = host
+            moved.port = port
+            devices.insert(moved, at: min(i, devices.count))
+        }
         if let i = devices.firstIndex(where: { $0.host == host && $0.port == port }) {
             if let model { devices[i].model = model }
             if let serial { devices[i].serial = serial }

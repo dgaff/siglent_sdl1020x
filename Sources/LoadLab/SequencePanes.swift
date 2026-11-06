@@ -14,7 +14,19 @@ private struct FunctionBanner: View {
     var title: String? = nil
 
     var body: some View {
-        if session.state.function != function {
+        if let r = session.recorder, r.isActive {
+            Label(r.info.kind == "profile" ? "A profile is running. This screen is locked until it ends."
+                                           : "A battery test is recording. This screen is locked until it ends.",
+                  systemImage: "lock.fill")
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+        } else if let q = session.sequence, q.phase == .running, q.function != function, !(q.function == .oppt && function == .ocpt) {
+            Label("A \(q.function.label) run is in progress. This screen is locked until it ends.", systemImage: "lock.fill")
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.orange.opacity(0.15), in: RoundedRectangle(cornerRadius: 8))
+        } else if session.state.function != function {
             HStack {
                 Label("The instrument is in \(session.state.function.label). Settings here are sent when you switch or press Send.",
                       systemImage: "info.circle")

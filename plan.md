@@ -340,3 +340,19 @@ I'll also `git init` the project at Phase 0, so every phase lands as reviewable 
   tests (List on supply, Program incl. a CV step, OCPT trip and no-trip, OPPT trip, Ext settings). Full hardware
   regression (T1 7 + T2 19): 25/26 passed, the OCPT stall above; after the fix OCPT/OPPT passed 3/3 repeats.
 - **Next:** Phase 7, polish plus the real-battery test (§8).
+
+### 2026-11-06: Phase 7 (polish, first pass) — real-battery test dropped by the user (they'll run it themselves)
+- **Quit while a run is active asks first.** Battery test: "Stop Test & Quit" (default), "Quit, Leave Test Running"
+  (the instrument enforces its stop conditions; LoadLab resumes the recording on reconnect — verified end to end on the
+  simulator), or Cancel. Profiles and List/Program/OCPT runs: "Stop & Quit" or Cancel. Input still always goes off
+  otherwise.
+- **Keyboard:** View menu ⌘1–⌘6 (Basic, Battery, List, Program, OCPT/OPPT, Ext), ⌘7 Profiles, ⌘8 Runs; Load menu
+  ⌘, Instrument Settings (plus ⇧⌘I input, ⌘. emergency off).
+- **App icon** (drawn in code: `scripts/make-icon.swift` → `Resources/LoadLab.icns`), bundled by `scripts/bundle.sh`.
+- **Sidebar:** "● run" badge on List/Program/OCPT while a run is in progress; screens explain why they're locked during
+  a run; an instrument seen at a new address (DHCP) updates its existing entry instead of adding a duplicate.
+- **Fixes:** a status reading taken while LoadLab switched the input could end a just-started Battery run (same race as
+  profiles; now one session-wide guard, with a simulator regression test that fails 1 in 6 without it). The run file
+  is now saved when LoadLab disconnects or quits, so events before a quit are kept.
+- **Checked:** dark appearance (test hook `LOADLAB_APPEARANCE=dark|light`), quit alert, resume after "leave running",
+  menu navigation. Hardware spot-check (Battery, profile, List, emergency off) passes; SDL left as the user had it.

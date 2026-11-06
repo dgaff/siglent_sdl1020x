@@ -57,7 +57,7 @@ struct SidebarView: View {
             Section("Functions") {
                 ForEach([ActiveFunction.basic, .battery, .list, .program, .ocpt, .ext], id: \.self) { f in
                     Label(f == .ocpt ? "OCPT / OPPT" : f.label, systemImage: f.symbol)
-                        .badge(f == .battery && app.session?.recorder?.isActive == true && app.session?.recorder?.info.kind != "profile" ? Text("● rec") : isActive(f) ? Text("active") : nil)
+                        .badge(badge(f))
                         .tag(SidebarDestination.function(f))
                 }
             }
@@ -86,6 +86,12 @@ struct SidebarView: View {
         }
         .task { await app.library.reload() }
         .sheet(isPresented: $showAdd) { addSheet }
+    }
+
+    private func badge(_ f: ActiveFunction) -> Text? {
+        if f == .battery, app.session?.recorder?.isActive == true, app.session?.recorder?.info.kind != "profile" { return Text("● rec") }
+        if let r = app.session?.sequence, r.phase == .running, r.function == f || (f == .ocpt && r.function == .oppt) { return Text("● run") }
+        return isActive(f) ? Text("active") : nil
     }
 
     private func isActive(_ f: ActiveFunction) -> Bool {

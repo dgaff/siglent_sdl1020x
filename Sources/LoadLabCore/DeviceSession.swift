@@ -52,9 +52,11 @@ public final class DeviceSession {
     public private(set) var profileRunner: ProfileRunner?
     /// A List / Program / OCPT / OPPT run (running or the last finished one).
     public internal(set) var sequence: SequenceRun?
-    /// Bumped around app-initiated input changes for sequences, so a status reading taken
-    /// meanwhile is ignored (same race as profiles; see hardware-notes).
-    var sequenceEpoch = 0
+    /// Bumped before and after every input change LoadLab makes (input switch, emergency off,
+    /// sequence start). A status reading taken while it changed may predate the change and is
+    /// ignored — otherwise a stale "off" ends a run that just started (seen on hardware for
+    /// profiles, and in the simulator for battery runs; see hardware-notes).
+    var inputEpoch = 0
     /// Grace period past an OCPT/OPPT ramp's longest possible duration before LoadLab stops it.
     public static let sequenceOverrun: Double = 3
     /// Results are being collected; the run shows as running until they're in.
@@ -95,7 +97,10 @@ public final class DeviceSession {
     }
 
     public func disconnect() async {
-        if let r = recorder, r.isActive { r.addEvent("disconnect", "LoadLab disconnected; the instrument continues on its own") }
+        if let r = recorder, r.isActive {
+            r.addEvent("disconnect", "LoadLab disconnected; the instrument continues on its own")
+            r.persist()
+        }
         pollTask?.cancel()
         pollTask = nil
         await sdl.connection.disconnect()
@@ -311,12 +316,13 @@ public final class DeviceSession {
     /// Cheap periodic status: input, short, active function (front-panel changes show up here).
     private func refreshStatus() async throws {
         let generation = profileRunner?.inputGeneration
-        let seqEpoch = sequenceEpoch
+        let epoch = inputEpoch
         let input = try await sdl.inputOn()
         let short = try await sdl.shortOn()
         let fn = try await readFunction()
         let wasOn = state.inputOn
-        state.inputOn = input
+        let stale = epoch != inputEpoch
+        if !stale { state.inputOn = input }
         state.shortOn = short
         if fn != state.function {
             state.function = fn
@@ -332,7 +338,7 @@ public final class DeviceSession {
             if sequence?.function == .list || sequence?.function == .program {
                 sequence?.step = (try? await sdl.testStep()) ?? sequence?.step ?? 0
             }
-            if !input, seqEpoch == sequenceEpoch { await finishSequence(.finished) }
+            if !input, !stale { await finishSequence(.finished) }
             // OCPT/OPPT that never ends: seen on hardware when the source oscillated in its current
             // limit instead of collapsing, so the instrument neither tripped nor finished the ramp.
             else if let r = sequence, r.phase == .running, r.function == .ocpt || r.function == .oppt {
@@ -352,7 +358,7 @@ public final class DeviceSession {
             return
         }
         // The instrument ended the test (stop condition, front panel, protection…).
-        if let r = recorder, r.isActive, wasOn, !input {
+        if let r = recorder, r.isActive, wasOn, !input, !stale {
             let reason = RunRecorder.inferEndReason(config: r.info.battery, lastVoltage: r.lastLoadedVoltage,
                                                     deviceCapacity: state.batteryCapacity_mAh,
                                                     deviceTime: state.batteryTime_s,
@@ -379,6 +385,8 @@ public final class DeviceSession {
     }
 
     public func setInput(_ on: Bool) async {
+        inputEpoch += 1
+        defer { inputEpoch += 1 }
         await perform(on ? "Input on" : "Input off") { sdl in
             try await sdl.setInput(on)
             self.state.inputOn = try await sdl.inputOn()
@@ -392,6 +400,8 @@ public final class DeviceSession {
     /// Input OFF, bypassing the `.connected` guard so it works mid-reconnect if possible.
     public func emergencyOff() async {
         profileRunner?.halt()          // no more commands from a profile
+        inputEpoch += 1
+        defer { inputEpoch += 1 }
         do {
             try await sdl.setInput(false)
             state.inputOn = try await sdl.inputOn()
@@ -1201,8 +1211,8 @@ extension DeviceSession {
         }
         if state.inputOn { await setInput(false) }
         var run = SequenceRun(function: f)
-        sequenceEpoch += 1
-        defer { sequenceEpoch += 1 }
+        inputEpoch += 1
+        defer { inputEpoch += 1 }
         do {
             switch f {
             case .list, .program:

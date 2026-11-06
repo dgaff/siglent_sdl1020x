@@ -5,7 +5,6 @@ import SDLKit
 struct ContentView: View {
     @Bindable var app: AppModel
     @AppStorage("chart.visible") private var chartVisible = true
-    @State private var showSettings = false
     @State private var columns: NavigationSplitViewVisibility = .all
 
     var body: some View {
@@ -34,7 +33,7 @@ struct ContentView: View {
         .toolbar {
             ToolbarItemGroup {
                 if let s = app.session, s.link != .disconnected {
-                    Button { showSettings = true } label: { Label("Instrument Settings", systemImage: "gearshape") }
+                    Button { app.showingInstrumentSettings = true } label: { Label("Instrument Settings", systemImage: "gearshape") }
                         .help("Sense, Von, protection, averaging, trigger…")
                         .disabled(!s.link.isUsable)
                     Toggle(isOn: $chartVisible) { Label("Chart", systemImage: "chart.xyaxis.line") }
@@ -43,7 +42,7 @@ struct ContentView: View {
                 }
             }
         }
-        .sheet(isPresented: $showSettings) {
+        .sheet(isPresented: $app.showingInstrumentSettings) {
             if let s = app.session { SettingsSheet(session: s) }
         }
         .task {
