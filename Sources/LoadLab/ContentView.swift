@@ -13,8 +13,18 @@ struct ContentView: View {
             SidebarView(app: app)
                 .navigationSplitViewColumnWidth(min: 220, ideal: 250)
         } detail: {
-            if app.showingLibrary {
+            if app.page == .library {
                 LibraryView(library: app.library)
+            } else if app.page == .profiles {
+                if let session = app.session, session.link.isUsable {
+                    VStack(spacing: 0) {
+                        ReadoutBar(session: session)
+                        Divider()
+                        ProfilesPane(session: session)
+                    }
+                } else {
+                    ProfilesPane(session: nil)
+                }
             } else if let session = app.session, session.link != .disconnected {
                 detail(session)
             } else {
@@ -39,7 +49,6 @@ struct ContentView: View {
         .task {
             // `--connect host[:port]` (used for testing and scripted launches).
             let args = ProcessInfo.processInfo.arguments
-            if args.contains("--library") { app.showingLibrary = true }
             if let i = args.firstIndex(of: "--connect"), i + 1 < args.count {
                 let parts = args[i + 1].split(separator: ":")
                 let host = String(parts[0]), port = parts.count > 1 ? UInt16(parts[1]) ?? 5025 : 5025
@@ -55,9 +64,25 @@ struct ContentView: View {
                     try? await s.startBatteryRun(config: c, cell: cell, options: o)
                     app.selectedFunction = .battery
                 }
-            } else if app.devices.isEmpty && !app.showingLibrary {
+                // Test hook: a short HPPC-style profile on a simulated cell (simulator only).
+                if ProcessInfo.processInfo.environment["LOADLAB_DEMO_PROFILE"] == "1",
+                   let s = app.session, s.identity?.serial.hasPrefix("SIM") == true {
+                    _ = await s.raw("SIM:BATTERY 8,4.2,3.0")
+                    _ = await s.raw("SIM:SOURCE:RES 0.06")
+                    var p = Profile(name: "Demo IR vs SoC", steps: [
+                        .loop([.rest(3), .dcr(i1: 0.1, t1: 2, i2: 0.9, t2: 1), .hold(.cc, 0.8, untilCapacity: 1.2)], count: 8)
+                    ])
+                    p.limits.cutoffVoltage = 3.2; p.limits.maxCurrent = 0.9; p.sampleRateHz = 5
+                    var cell = CellInfo(); cell.name = "Demo cell"; cell.nominalCapacity_mAh = 8
+                    try? await s.startProfileRun(p, cell: cell)
+                    app.page = .profiles
+                }
+            } else if app.devices.isEmpty && !args.contains("--library") && !args.contains("--profiles") {
                 await app.scan()
             }
+            // After connecting (which picks the instrument's own screen).
+            if args.contains("--library") { app.page = .library }
+            if args.contains("--profiles") { app.page = .profiles }
         }
     }
 

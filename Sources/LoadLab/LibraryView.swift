@@ -161,6 +161,7 @@ struct RunDetailView: View {
                     MetricsGrid(entry: entry, analysis: analysis)
                     chartControls
                     chart.frame(height: 300)
+                    if let dcr = entry.info.dcrResults, !dcr.isEmpty { DCRResultsView(results: dcr) }
                     if !analysis.resistanceSteps.isEmpty { resistanceTable }
                     events
                 }
@@ -316,6 +317,13 @@ func settingsSummary(_ i: RunInfo) -> String {
     if i.battery.stopVoltageEnabled { stops.append("V ≤ \(i.battery.stopVoltage.formatted()) V") }
     if i.battery.stopCapacityEnabled { stops.append("\(Int(i.battery.stopCapacity)) mAh") }
     if i.battery.stopTimeEnabled { stops.append("\(Int(i.battery.stopTime)) s") }
+    if let p = i.profile {
+        var s = "Profile “\(p.name)”: " + p.rows.map { String(repeating: "  ", count: $0.depth) + "\($0.step.kind.label) \($0.step.summary)" }.joined(separator: "; ")
+        s += ". Cut-off \(p.limits.cutoffVoltage.formatted()) V, max \(p.limits.maxCurrent.formatted()) A, ranges \(p.currentRange.label) / \(p.voltageRange.label), Von failsafe \((p.limits.cutoffVoltage - p.limits.hardwareMargin).formatted()) V; "
+        s += "\(i.options.sampleRateHz.formatted()) samples/s. "
+        s += [i.deviceModel, i.deviceSerial.map { "s/n \($0)" }, i.deviceFirmware.map { "fw \($0)" }].compactMap { $0 }.joined(separator: " ")
+        return s
+    }
     var s = "\(i.battery.mode.label) \(i.battery.level.formatted()) \(i.battery.mode.unit), ranges \(i.battery.currentRange.label) / \(i.battery.voltageRange.label); stop: \(stops.joined(separator: ", ")); "
     s += "\(i.options.sampleRateHz.formatted()) samples/s; "
     s += i.savedVOn != nil ? "backup cut-off armed. " : "no backup cut-off. "

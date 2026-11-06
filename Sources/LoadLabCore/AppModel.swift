@@ -28,8 +28,14 @@ public final class AppModel {
     public private(set) var scanning = false
     public var session: DeviceSession?
     public var selectedFunction: ActiveFunction = .basic
-    /// The run library replaces the function pane when shown (works without a connection).
-    public var showingLibrary = false
+    /// What the detail area shows: an instrument function, the run library or the profiles
+    /// (library and profiles work without a connection).
+    public enum Page: Hashable, Sendable { case function, library, profiles }
+    public var page: Page = .function
+    public var showingLibrary: Bool {
+        get { page == .library }
+        set { page = newValue ? .library : .function }
+    }
     public let library = LibraryModel()
 
     private let defaults: UserDefaults
@@ -96,8 +102,12 @@ public final class AppModel {
         if let id = s.identity {
             upsert(host: device.host, port: device.port, model: id.model, serial: id.serial)
         }
-        selectedFunction = s.recorder != nil ? .battery : s.state.function
-        showingLibrary = false
+        if s.recorder?.info.kind == "profile" {
+            page = .profiles
+        } else {
+            selectedFunction = s.recorder != nil ? .battery : s.state.function
+            page = .function
+        }
     }
 
     public func disconnect() async {

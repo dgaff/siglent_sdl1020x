@@ -281,4 +281,131 @@ struct HardwareT2Tests {
         }
         try? FileManager.default.removeItem(at: store.root)
     }
+
+    // MARK: - Phase 5: profile safety
+
+    /// The failsafe a profile relies on: Von (latch off) stops the load with LoadLab fully
+    /// disconnected, and the load resumes if the voltage recovers (documented behaviour).
+    @Test func vOnFailsafeWithAppDisconnected() async throws {
+        try await withRig(volts: 4.0) { s, psu in
+            await s.setMode(.cc)
+            await s.setCurrentRange(.cc, .low)
+            await s.setLevel(.cc, 0.5)
+            await s.setVOn(3.5)
+            await s.setVOnLatch(false)
+            await s.setInput(true)
+            await settle(1000)
+            let loaded = try await psu.current()
+            // LoadLab goes away (as if the Mac slept or the network dropped).
+            await s.disconnect()
+            try await psu.set(volts: 3.3, amps: 0.8)
+            await settle(1500)
+            let below = try await psu.current()
+            try await psu.set(volts: 3.8, amps: 0.8)
+            await settle(1500)
+            let recovered = try await psu.current()
+            try await psu.set(volts: 3.3, amps: 0.8)
+            await settle(1500)
+            let belowAgain = try await psu.current()
+            await s.connect()
+            try #require(s.link == .connected)
+            await s.setInput(false)
+            print("T2 failsafe (app disconnected, Von 3.5 latch off): 4.0 V → \(loaded) A, 3.3 V → \(below) A, 3.8 V → \(recovered) A, 3.3 V → \(belowAgain) A (PSU readings)")
+            #expect(near(loaded, 0.5, 0.02))
+            #expect(below < 0.01, "load kept sinking below Von without the app")
+            #expect(near(recovered, 0.5, 0.02))
+            #expect(belowAgain < 0.01)
+        }
+    }
+
+    /// A complete profile on the supply: steps, DCR, pulses, then the supply "discharges"
+    /// through the cut-off. Everything must be restored (the snapshot diff checks it).
+    @Test func profileRunOnSupply() async throws {
+        let store = RunStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("loadlab-hw-\(UUID().uuidString)"))
+        try await withRig(volts: 4.0, amps: 0.8) { s, psu in
+            s.runStore = store
+            var p = Profile(name: "HW profile", steps: [
+                .mark("Start"),
+                .hold(.cc, 0.3, duration: 3),
+                .rest(2),
+                .dcr(i1: 0.1, t1: 2, i2: 0.6, t2: 2),
+                .pulse(.cc, high: 0.5, highSeconds: 1, low: 0.1, lowSeconds: 1, count: 2),
+                .hold(.cc, 0.5),
+            ])
+            p.limits.cutoffVoltage = 3.5
+            p.limits.maxCurrent = 0.8
+            p.sampleRateHz = 5
+            var cell = CellInfo(); cell.name = "PSU emulated cell"
+            try await s.startProfileRun(p, cell: cell)
+            let r = try #require(s.recorder)
+            let runner = try #require(s.profileRunner)
+            #expect(abs(s.state.vOn - 3.4) < 0.001 && s.state.vOnLatch == false, "failsafe not armed")
+            // During the first hold, the supply sees ~0.3 A.
+            try await Task.sleep(for: .seconds(2))
+            let holdCurrent = try await psu.current()
+            // Wait for the final hold, then ramp the supply down through the cut-off.
+            for _ in 0..<200 where runner.stepNumber < 5 && r.isActive { try await Task.sleep(for: .milliseconds(100)) }
+            try await Task.sleep(for: .seconds(2))
+            var v = 4.0
+            while v > 3.3, r.isActive {
+                v -= 0.05
+                try await psu.set(volts: v, amps: 0.8)
+                try await Task.sleep(for: .milliseconds(400))
+            }
+            for _ in 0..<20 where r.isActive { try await Task.sleep(for: .milliseconds(250)) }
+            await settle(500)
+            let after = try await psu.current()
+            let dcr = r.info.dcrResults?.first
+            print("T2 profile: status \(r.info.status) reason \(String(describing: r.info.endReason)) hold \(holdCurrent) A, "
+                  + "after \(after) A, DCR \(dcr.map { "\($0.milliohms) mΩ (\($0.i1)→\($0.i2) A, \($0.v1)→\($0.v2) V)" } ?? "none"), "
+                  + "steps \(runner.stepNumber), samples \(r.samples.count), \(r.info.summary.capacity_mAh) mAh")
+            if r.info.endReason != .voltageCutoff {
+                let t0 = r.info.startedAt
+                var lastQuery = ""
+                for e in s.log where e.date.timeIntervalSince(t0) > -3 {
+                    let interesting = e.kind == .write || e.kind == .error || e.kind == .info || e.text.hasPrefix(":INP") || (e.kind == .reply && lastQuery.hasPrefix(":INP"))
+                    if e.kind == .query { lastQuery = e.text }
+                    if interesting { print(String(format: "LOG %+.3f", e.date.timeIntervalSince(t0)), e.kind, e.text) }
+                }
+                for e in r.info.events { print("EVENT", String(format: "%.3f", e.t), e.kind, e.text) }
+            }
+            #expect(near(holdCurrent, 0.3, 0.02))
+            #expect(r.info.status == .completed && r.info.endReason == .voltageCutoff)
+            #expect(after < 0.01)
+            #expect(!s.state.inputOn)
+            let d = try #require(dcr)
+            #expect(d.milliohms > 0 && d.milliohms < 300, "DCR \(d.milliohms) mΩ (supply + wiring)")
+            let currents = r.samples.map(\.current)
+            #expect(currents.contains { near($0, 0.5, 0.02) } && currents.contains { near($0, 0.1, 0.02) })
+        }
+        try? FileManager.default.removeItem(at: store.root)
+    }
+
+    /// Losing the connection mid-profile: on reconnect the input goes off and the run ends.
+    @Test func profileLinkDropSwitchesInputOff() async throws {
+        let store = RunStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("loadlab-hw-\(UUID().uuidString)"))
+        try await withRig(volts: 4.0, amps: 0.8) { s, psu in
+            s.runStore = store
+            var p = Profile(name: "HW link drop", steps: [.hold(.cc, 0.4, duration: 60)])
+            p.limits.cutoffVoltage = 3.5
+            p.limits.maxCurrent = 0.8
+            p.sampleRateHz = 5
+            try await s.startProfileRun(p, cell: CellInfo())
+            let r = try #require(s.recorder)
+            try await Task.sleep(for: .seconds(2))
+            let before = try await psu.current()
+            await s.sdl.connection.disconnect()          // the network "drops"
+            let t0 = ContinuousClock.now
+            for _ in 0..<120 where r.isActive { try await Task.sleep(for: .milliseconds(250)) }
+            let took = ContinuousClock.now - t0
+            for _ in 0..<80 where s.link != .connected { try await Task.sleep(for: .milliseconds(250)) }
+            await settle(500)
+            let after = try await psu.current()
+            print("T2 link drop: before \(before) A, after \(after) A, ended in \(took), reason \(String(describing: r.info.endReason))")
+            #expect(near(before, 0.4, 0.02))
+            #expect(!r.isActive && r.info.endReason == .connectionLost)
+            #expect(after < 0.01)
+        }
+        try? FileManager.default.removeItem(at: store.root)
+    }
 }

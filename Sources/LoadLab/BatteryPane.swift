@@ -231,7 +231,7 @@ private struct BatterySetup: View {
 
 // MARK: - Run dashboard
 
-private struct RunDashboard: View {
+struct RunDashboard: View {
     @Bindable var session: DeviceSession
     let recorder: RunRecorder
 
@@ -248,6 +248,7 @@ private struct RunDashboard: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 header
+                if info.profile != nil { ProfileProgress(session: session, recorder: recorder) }
                 stats
                 Picker("Chart", selection: $chart) {
                     ForEach(ChartKind.allCases) { Text($0.rawValue).tag($0) }
@@ -256,6 +257,7 @@ private struct RunDashboard: View {
                 .labelsHidden()
                 RunChart(kind: chart, samples: RunSample.downsample(recorder.samples), cutoff: info.battery.stopVoltageEnabled ? info.battery.stopVoltage : nil)
                     .frame(minHeight: 260)
+                if let dcr = info.dcrResults, !dcr.isEmpty { DCRResultsView(results: dcr) }
                 details
             }
             .padding(20)
@@ -267,7 +269,7 @@ private struct RunDashboard: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 4) {
                 Text(info.title).font(.title2.weight(.semibold))
-                Text("\(info.battery.mode.label) \(info.battery.level.formatted()) \(info.battery.mode.unit) · started \(info.startedAt.formatted(date: .abbreviated, time: .shortened))")
+                Text("\(info.profile.map { "Profile: \($0.name)" } ?? "\(info.battery.mode.label) \(info.battery.level.formatted()) \(info.battery.mode.unit)") · started \(info.startedAt.formatted(date: .abbreviated, time: .shortened))")
                     .foregroundStyle(.secondary)
             }
             statusBadge
@@ -281,7 +283,7 @@ private struct RunDashboard: View {
                 Button { NSWorkspace.shared.activateFileViewerSelecting([recorder.folder.appendingPathComponent("samples.csv")]) } label: {
                     Label("Show Files", systemImage: "folder")
                 }
-                Button { session.dismissRun() } label: { Label("New Test", systemImage: "plus") }
+                Button { session.dismissRun() } label: { Label(info.profile == nil ? "New Test" : "Back to Profiles", systemImage: "plus") }
                     .buttonStyle(.borderedProminent)
             }
         }
@@ -306,8 +308,10 @@ private struct RunDashboard: View {
                 Stat(title: "Elapsed", value: Self.duration(recorder.isActive ? Date().timeIntervalSince(info.startedAt) : info.summary.duration_s))
                 Stat(title: "Capacity", value: cap.formatted(.number.precision(.fractionLength(cap < 100 ? 2 : 1))), unit: "mAh", color: .orange)
                 Stat(title: "Energy", value: recorder.integrator.energy_Wh.formatted(.number.precision(.fractionLength(3))), unit: "Wh", color: .pink)
-                Stat(title: "Instrument count", value: recorder.deviceCapacity.map { "\(Int($0))" } ?? "—", unit: "mAh")
-                    .help("The SDL's own counter (1 mAh resolution), for cross-checking.")
+                if info.profile == nil {
+                    Stat(title: "Instrument count", value: recorder.deviceCapacity.map { "\(Int($0))" } ?? "—", unit: "mAh")
+                        .help("The SDL's own counter (1 mAh resolution), for cross-checking.")
+                }
             }
             GridRow {
                 Stat(title: "Voltage", value: last.map { $0.voltage.formatted(.number.precision(.fractionLength(4))) } ?? "—", unit: "V", color: .blue)
@@ -351,7 +355,7 @@ private struct RunDashboard: View {
     }
 }
 
-private struct Stat: View {
+struct Stat: View {
     let title: String
     let value: String
     var unit: String = ""
@@ -408,7 +412,7 @@ private struct RunChart: View {
 
 // MARK: - Draft number inputs (plain bindings; applied when the test starts)
 
-private struct NumberField: View {
+struct NumberField: View {
     @Binding var value: Double
     let unit: String
     var digits = 3
@@ -421,7 +425,7 @@ private struct NumberField: View {
     }
 }
 
-private struct NumberRow: View {
+struct NumberRow: View {
     let label: String
     @Binding var value: Double
     let unit: String
@@ -435,7 +439,7 @@ private struct NumberRow: View {
     }
 }
 
-private struct OptionalNumberRow: View {
+struct OptionalNumberRow: View {
     let label: String
     @Binding var value: Double?
     let unit: String
@@ -446,6 +450,91 @@ private struct OptionalNumberRow: View {
                     .textFieldStyle(.roundedBorder).multilineTextAlignment(.trailing).monospacedDigit().frame(width: 100)
                 Text(unit).foregroundStyle(.secondary).frame(minWidth: 34, alignment: .leading)
             }
+        }
+    }
+}
+
+// MARK: - Profile run extras
+
+/// Current step, loop iteration and safety layers of a running profile.
+struct ProfileProgress: View {
+    let session: DeviceSession
+    let recorder: RunRecorder
+
+    var body: some View {
+        let runner = session.profileRunner
+        VStack(alignment: .leading, spacing: 6) {
+            if recorder.isActive, let runner {
+                HStack(spacing: 8) {
+                    Image(systemName: "play.circle.fill").foregroundStyle(.green)
+                    Text("Step \(runner.stepNumber)").font(.headline)
+                    Text(runner.stepText).lineLimit(1)
+                    Spacer()
+                    if let t = runner.stepStartedAt {
+                        TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                            Text(RunDashboard.duration(ctx.date.timeIntervalSince(t))).monospacedDigit().foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if let iter = runner.loopIterations.values.max() {
+                    Text("Repeat \(iter)").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if let p = recorder.info.profile {
+                HStack(spacing: 14) {
+                    Label("Cut-off \(p.limits.cutoffVoltage.formatted()) V", systemImage: "arrow.down.to.line")
+                    Label("Max \(p.limits.maxCurrent.formatted()) A", systemImage: "bolt.badge.xmark")
+                    Label("Von \((p.limits.cutoffVoltage - p.limits.hardwareMargin).formatted()) V (latch off)", systemImage: "lock.shield")
+                    if session.preventingSleep { Label("Mac kept awake", systemImage: "cup.and.saucer") }
+                }
+                .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+/// DC resistance measurements from a profile: resistance vs capacity, plus a table.
+struct DCRResultsView: View {
+    let results: [DCRResult]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("DC resistance").font(.headline)
+            if results.count > 1 {
+                Chart(results) { r in
+                    LineMark(x: .value("Capacity (mAh)", r.capacity_mAh), y: .value("mΩ", r.milliohms))
+                        .foregroundStyle(Color.purple)
+                    PointMark(x: .value("Capacity (mAh)", r.capacity_mAh), y: .value("mΩ", r.milliohms))
+                        .foregroundStyle(Color.purple)
+                }
+                .chartXAxisLabel("Capacity delivered (mAh)")
+                .chartYAxisLabel("Resistance (mΩ)")
+                .chartYScale(domain: .automatic(includesZero: false))
+                .frame(height: 200)
+            }
+            Grid(alignment: .trailing, horizontalSpacing: 18, verticalSpacing: 4) {
+                GridRow {
+                    Text("Time").gridColumnAlignment(.leading)
+                    Text("Delivered"); Text("I₁ → I₂"); Text("V₁ → V₂"); Text("Resistance")
+                }
+                .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(results) { r in
+                    GridRow {
+                        Text(RunDashboard.duration(r.t)).gridColumnAlignment(.leading)
+                        Text(String(format: "%.1f mAh", r.capacity_mAh))
+                        Text(String(format: "%.3f → %.3f A", r.i1, r.i2))
+                        Text(String(format: "%.4f → %.4f V", r.v1, r.v2))
+                        Text(String(format: "%.1f mΩ", r.milliohms)).fontWeight(.medium)
+                    }
+                    .monospacedDigit()
+                }
+            }
+            .font(.callout)
+            Text("Two-current method: ΔV / ΔI from readings at the end of each current. Includes connection and wiring resistance unless Sense is wired at the cell.")
+                .font(.caption).foregroundStyle(.secondary)
         }
     }
 }

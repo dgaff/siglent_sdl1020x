@@ -59,6 +59,7 @@ public enum RunStatus: String, Sendable, Codable {
 
 public enum EndReason: String, Sendable, Codable {
     case voltageCutoff, capacityLimit, timeLimit, userStopped, inputSwitchedOff, endedWhileDisconnected, error
+    case profileFinished, currentLimit, connectionLost
 
     public var label: String {
         switch self {
@@ -69,6 +70,9 @@ public enum EndReason: String, Sendable, Codable {
         case .inputSwitchedOff: "Input switched off (front panel or protection)"
         case .endedWhileDisconnected: "Ended while LoadLab was disconnected"
         case .error: "Stopped after an error"
+        case .profileFinished: "All profile steps done"
+        case .currentLimit: "Safety stop: current above the limit"
+        case .connectionLost: "Safety stop: connection lost during a profile"
         }
     }
 }
@@ -116,6 +120,40 @@ public struct RunInfo: Sendable, Codable, Identifiable, Equatable {
     public var summary = RunSummary()
     public var events: [RunEvent] = []
     public var appVersion = "LoadLab 0.3"
+    // Profile runs (kind == "profile"); optional so older run.json files still decode.
+    public var profile: Profile?
+    public var dcrResults: [DCRResult]?
+    /// Basic-mode settings before a profile ran, restored when it ends.
+    public var savedBasic: SavedBasic?
+}
+
+/// One two-current DC resistance measurement during a profile.
+public struct DCRResult: Sendable, Codable, Equatable, Identifiable {
+    public var id: Double { t }
+    public var t: Double
+    public var capacity_mAh: Double
+    public var i1: Double
+    public var v1: Double
+    public var i2: Double
+    public var v2: Double
+    public var milliohms: Double { abs((v1 - v2) / (i2 - i1)) * 1000 }
+    public init(t: Double, capacity_mAh: Double, i1: Double, v1: Double, i2: Double, v2: Double) {
+        self.t = t; self.capacity_mAh = capacity_mAh; self.i1 = i1; self.v1 = v1; self.i2 = i2; self.v2 = v2
+    }
+}
+
+/// The Basic settings a profile changes.
+public struct SavedBasic: Sendable, Codable, Equatable {
+    public struct Mode: Sendable, Codable, Equatable {
+        public var mode: LoadMode
+        public var level: Double
+        public var currentRange: CurrentRange
+        public var voltageRange: VoltageRange
+    }
+    public var mode: LoadMode
+    public var dynamic: Bool
+    public var modes: [Mode]
+    public var resistanceRange: ResistanceRange
 }
 
 /// One recorded sample.

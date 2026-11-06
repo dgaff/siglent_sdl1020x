@@ -280,3 +280,34 @@ I'll also `git init` the project at Phase 0, so every phase lands as reviewable 
 - **Test hooks for UI checks:** `--library`, `LOADLAB_RUNS_DIR`, `LOADLAB_SELECT_RUNS`, `LOADLAB_EXPORT_REPORT`, and `LOADLAB_DEMO_RUN` (simulator only).
 - **Tests:** 66 simulator/unit tests. Library views checked by screenshot against synthetic fixtures, where the analysis recovered the fixture cells' set internal resistance (48 mΩ) exactly.
 - **Next:** Phase 5, the profile engine (app-scripted discharges, HPPC-style IR vs SoC, pulse loads, multi-rate) with the safety watchdog.
+
+### 2026-11-06: Phase 5 done
+- **Profiles screen** (sidebar → Battery Lab → Profiles; editing works offline):
+  - Saved profiles (JSON, `~/Documents/LoadLab/Profiles`), created from templates or blank; duplicate, delete (Trash).
+  - Step outline with nested repeats; inspector per step; add/move/delete; validation messages; rough duration estimate.
+  - Step types: Hold (CC/CP/CR until time / step mAh / V), Rest, Pulse train (app-timed, ≥ 1 s parts), DC resistance
+    (two-current), Repeat (count / run mAh / V), Mark.
+  - Templates (sized from the cell, capped at 0.9 A for this bench): constant-current capacity; multi-rate
+    (1C → rest → 0.5C → rest → 0.2C, each to its knee); pulse discharge; IR vs SoC (HPPC-style: rest, DCR pulse,
+    10 % slice, repeat); constant power (sized at the cut-off so current stays under the cap).
+- **Engine** (`ProfileRunner`) drives Basic static mode; switching mode switches the input off (instrument behaviour),
+  so it re-enables the input after setting the level. Records step/loop/mark/DCR events; DCR results saved in run.json.
+- **Safety layers:**
+  1. Per-sample watchdog in the polling path (independent of the engine): cut-off under load, current above the limit
+     (+5 % / 20 mA), optional capacity and time limits.
+  2. Von = cut-off − margin, latch OFF, armed and read back before the input first turns on (verified on hardware with
+     LoadLab disconnected; see hardware-notes).
+  3. Mac kept awake during any run (battery runs too).
+  4. A dropped connection ends the profile: input OFF on reconnect. A profile found "running" after LoadLab restarts
+     is switched off and closed as interrupted (never resumed).
+  5. Unexpected input-off (front panel, protection) ends the run.
+  6. Start refused if the cell is at/below the cut-off, or if ranges/Von don't read back as set.
+  - The user's Basic mode, levels, ranges, Von and latch are restored afterwards.
+- **Decision:** no hardware OCP/OPP during profiles. The instrument's protection trip behaviour over SCPI isn't
+  characterised yet, so the app-side current watchdog is the current limit. Revisit in Phase 7.
+- **Library:** profile runs list as "Profile: name"; detail shows DCR-vs-capacity chart and table, and the step list.
+- **Test hooks:** `--profiles`, `LOADLAB_PROFILES_DIR`, `LOADLAB_DEMO_PROFILE=1` (simulator only).
+- **Tests:** 64 simulator/unit tests (15 new: model, templates, editing, store, and simulator runs covering cut-off,
+  loops, over-current, unexpected input-off, dropped link, refused start, interrupted run). Hardware T2: 13/13 pass,
+  including three new Phase 5 tests (failsafe with app disconnected, full profile on the supply, link drop).
+- **Next:** Phase 6, the List, Program, OCPT/OPPT and Ext screens.

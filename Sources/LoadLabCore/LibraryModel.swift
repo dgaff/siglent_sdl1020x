@@ -13,7 +13,10 @@ public struct RunEntry: Identifiable, Sendable, Equatable {
     public var energy: Double { info.summary.energy_Wh }
     public var duration: Double { info.summary.duration_s }
     public var chemistry: String { info.cell.chemistry }
-    public var setpoint: String { "\(info.battery.mode.label) \(info.battery.level.formatted()) \(info.battery.mode.unit)" }
+    public var setpoint: String {
+        if let p = info.profile { return "Profile: \(p.name)" }
+        return "\(info.battery.mode.label) \(info.battery.level.formatted()) \(info.battery.mode.unit)"
+    }
 }
 
 /// Browses the run folders (the folders are the source of truth; nothing else to keep in sync).

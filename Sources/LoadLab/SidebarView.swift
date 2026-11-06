@@ -3,6 +3,7 @@ import LoadLabCore
 
 enum SidebarDestination: Hashable {
     case function(ActiveFunction)
+    case profiles
     case library
 }
 
@@ -13,7 +14,8 @@ struct SidebarView: View {
     @State private var selection: SidebarDestination?
 
     private var modelDestination: SidebarDestination {
-        if app.showingLibrary { return .library }
+        if app.page == .library { return .library }
+        if app.page == .profiles { return .profiles }
         // OPPT shares the OCPT row.
         return .function(app.selectedFunction == .oppt ? .ocpt : app.selectedFunction)
     }
@@ -55,12 +57,15 @@ struct SidebarView: View {
             Section("Functions") {
                 ForEach([ActiveFunction.basic, .battery, .list, .program, .ocpt, .ext], id: \.self) { f in
                     Label(f == .ocpt ? "OCPT / OPPT" : f.label, systemImage: f.symbol)
-                        .badge(f == .battery && app.session?.recorder?.isActive == true ? Text("● rec") : isActive(f) ? Text("active") : nil)
+                        .badge(f == .battery && app.session?.recorder?.isActive == true && app.session?.recorder?.info.kind != "profile" ? Text("● rec") : isActive(f) ? Text("active") : nil)
                         .tag(SidebarDestination.function(f))
                 }
             }
 
-            Section("Library") {
+            Section("Battery Lab") {
+                Label("Profiles", systemImage: "list.bullet.rectangle")
+                    .badge(app.session?.recorder?.isActive == true && app.session?.recorder?.info.kind == "profile" ? Text("● run") : nil)
+                    .tag(SidebarDestination.profiles)
                 Label("Runs", systemImage: "books.vertical")
                     .badge(app.library.entries.isEmpty ? nil : Text("\(app.library.entries.count)"))
                     .tag(SidebarDestination.library)
@@ -73,8 +78,9 @@ struct SidebarView: View {
         // Sidebar → model.
         .onChange(of: selection) { _, new in
             switch new {
-            case .library?: app.showingLibrary = true
-            case .function(let f)?: app.showingLibrary = false; app.selectedFunction = f
+            case .library?: app.page = .library
+            case .profiles?: app.page = .profiles
+            case .function(let f)?: app.page = .function; app.selectedFunction = f
             case nil: break
             }
         }

@@ -97,6 +97,12 @@ public final class RunRecorder {
 
     public func setNotes(_ notes: String) { info.cell.notes = notes; save() }
 
+    /// Records a profile's DC resistance measurement (saved straight away).
+    public func addDCR(_ r: DCRResult) {
+        info.dcrResults = (info.dcrResults ?? []) + [r]
+        save()
+    }
+
     private func updateSummary() {
         var s = RunSummary()
         s.samples = samples.count

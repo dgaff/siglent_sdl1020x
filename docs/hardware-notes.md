@@ -83,3 +83,18 @@ must set latch OFF explicitly and verify by read-back before switching the input
 - V_Stop ends the test (input OFF) within ~1.5 s of the voltage falling below it; C_Stop ended a 0.5 A run at 15 s (2.08 mAh actual, counter 2).
 - The instrument does not report *why* it stopped. LoadLab infers it: voltage cut-off if the last loaded reading was within 10 % of V_Stop or the relaxed voltage is at/below V_Stop; otherwise capacity/time limits by counter; else "input switched off".
 - Phase 3 T2 run (CC 0.5 A, V_Stop 3.5 V, supply ramped 4.0 → 3.3 V): completed by voltage cut-off at 3.516 V loaded; app 1.25 mAh vs counter 1 mAh; backup Von 3.4 V / latch OFF armed during the run and the user's Von/latch restored afterwards.
+
+## Profiles (Phase 5) — measured with the E36234A as source, 2026-11-06
+- **Von failsafe with LoadLab fully disconnected** (TCP closed, CC 0.5 A, Von 3.5 V latch OFF), currents read by the PSU:
+  4.0 V → 0.4998 A; **3.3 V → 0.04–0.08 mA**; 3.8 V → 0.4998 A (resumes); 3.3 V → 0.08 mA.
+  The instrument enforces it on its own. Because latch is OFF, the load **resumes** if the voltage recovers above Von
+  (a resting cell can bounce back), so it is a backstop: LoadLab still switches the input off at the cut-off.
+- **Full profile on the supply** (hold 0.3 A, rest, DCR 0.1 → 0.6 A, two pulses 0.5/0.1 A, hold 0.5 A while the supply
+  ramped 4.0 → 3.3 V): ended by the app's cut-off at 3.5 V; settings snapshot diff empty afterwards (Basic mode, levels,
+  ranges, Von, latch all restored). DCR read **71 mΩ** (supply output impedance + leads; no remote sense).
+- **Dropped connection mid-profile** (0.4 A hold, socket closed by the app): reconnected and switched the input off
+  **2.5 s** later; run recorded as "connection lost".
+- **Timing lesson:** a status poll (`:INP?` then 6 more queries, ~100 ms) can straddle the runner's `:INP ON`.
+  Judging that stale "off" against the new "should be on" ended every hardware run at once. Status readings are now
+  ignored if the runner changed the input while they were taken (`inputGeneration`). The simulator is too fast to
+  hit this reliably; the hardware test `profileRunOnSupply` failed every time without the fix.

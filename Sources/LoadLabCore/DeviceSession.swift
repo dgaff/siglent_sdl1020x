@@ -48,6 +48,10 @@ public final class DeviceSession {
 
     /// The active (or last finished) run. Only one at a time.
     public private(set) var recorder: RunRecorder?
+    /// Drives an app-scripted profile run (nil for instrument Battery runs).
+    public private(set) var profileRunner: ProfileRunner?
+    /// Keeps the Mac from idle-sleeping while a run is active.
+    private var sleepActivity: NSObjectProtocol?
     public var runStore = RunStore()
 
     public let sdl: SDL1000X
@@ -147,6 +151,7 @@ public final class DeviceSession {
             latest = m
             history.append(m)
             recorder?.ingest(m)
+            if profileRunner?.isActive == true { await checkProfileSafety(m) }
             if ContinuousClock.now - lastStatus >= .seconds(1) {
                 lastStatus = ContinuousClock.now
                 try await refreshStatus()
@@ -188,6 +193,13 @@ public final class DeviceSession {
                 link = .connected
                 lastError = nil
                 if recorder?.isActive == true { recorder?.addEvent("reconnect", "Reconnected after: \(reason)") }
+                // A profile never continues across a dropped connection: the app was out of
+                // the loop, so switch the input off and end the run.
+                if profileRunner?.isActive == true || profileRunner?.linkLost == true {
+                    try? await sdl.setInput(false)
+                    state.inputOn = (try? await sdl.inputOn()) ?? state.inputOn
+                    await endRun(status: .stopped, reason: .connectionLost)
+                }
                 return
             } catch {
                 let delay = min(10.0, pow(2.0, Double(min(attempt, 4))) * 0.5)
@@ -286,6 +298,7 @@ public final class DeviceSession {
 
     /// Cheap periodic status: input, short, active function (front-panel changes show up here).
     private func refreshStatus() async throws {
+        let generation = profileRunner?.inputGeneration
         let input = try await sdl.inputOn()
         let short = try await sdl.shortOn()
         let fn = try await readFunction()
@@ -300,6 +313,14 @@ public final class DeviceSession {
             state.batteryCapacity_mAh = try await sdl.batteryDischargedCapacity()
             state.batteryTime_s = try await sdl.batteryDischargeTime()
             recorder?.updateDeviceCounters(capacity: state.batteryCapacity_mAh, time: state.batteryTime_s)
+        }
+        // A profile expected the input on, but it went off (front panel, protection…).
+        if let r = recorder, r.info.kind == "profile" {
+            // Only trust the reading if the runner didn't touch the input meanwhile.
+            if r.isActive, !input, profileRunner?.expectInputOn == true, profileRunner?.inputGeneration == generation {
+                await endRun(status: .stopped, reason: .inputSwitchedOff)
+            }
+            return
         }
         // The instrument ended the test (stop condition, front panel, protection…).
         if let r = recorder, r.isActive, wasOn, !input {
@@ -338,6 +359,7 @@ public final class DeviceSession {
 
     /// Input OFF, bypassing the `.connected` guard so it works mid-reconnect if possible.
     public func emergencyOff() async {
+        profileRunner?.halt()          // no more commands from a profile
         do {
             try await sdl.setInput(false)
             state.inputOn = try await sdl.inputOn()
@@ -650,6 +672,7 @@ public final class DeviceSession {
             throw RunStartError.inputDidNotStart
         }
         r.addEvent("input", String(format: "Input on: %@ %.3f %@", applied.mode.label, applied.level, applied.mode.unit))
+        beginSleepActivity()
     }
 
     /// Stops the run from the app (input OFF first).
@@ -662,6 +685,14 @@ public final class DeviceSession {
         guard let r = recorder, r.isActive, !ending else { return }
         ending = true
         defer { ending = false }
+        if r.info.kind == "profile" {
+            // Stop the engine before anything else, then make sure the load is off.
+            profileRunner?.halt()
+            if (try? await sdl.setInput(false)) == nil {
+                lastError = "Could not switch the input off — check the instrument"
+            }
+            state.inputOn = (try? await sdl.inputOn()) ?? state.inputOn
+        }
         // One reading with the load off, for the "load removed" resistance step / rest voltage.
         if var after = try? await sdl.measureAll() {
             if abs(after.current) < Self.resistanceCurrentFloor { after.resistance = 0 }
@@ -675,7 +706,9 @@ public final class DeviceSession {
         // Clean up *before* marking the run finished, so "finished" means the user's
         // Von/latch are back.
         await restoreVOn(r.info)
+        if let b = r.info.savedBasic { await restoreBasic(b) }
         pollInterval = idlePollInterval
+        endSleepActivity()
         r.finish(status: status, reason: reason)
     }
     private var ending = false
@@ -692,10 +725,24 @@ public final class DeviceSession {
         guard link == .connected, recorder == nil else { return }
         for (folder, _) in runStore.runningRuns(serial: identity?.serial) {
             guard let r = try? RunRecorder(resuming: folder, store: runStore) else { continue }
+            if r.info.kind == "profile" {
+                // Profiles can't continue without LoadLab in the loop: make sure the load is off.
+                if state.inputOn {
+                    try? await sdl.setInput(false)
+                    state.inputOn = (try? await sdl.inputOn()) ?? state.inputOn
+                    r.addEvent("safety", "Input switched off on reconnect (the profile can't continue)")
+                }
+                r.finish(status: .interrupted, reason: .endedWhileDisconnected)
+                await restoreVOn(r.info)
+                if let b = r.info.savedBasic { await restoreBasic(b) }
+                if recorder == nil { recorder = r }
+                continue
+            }
             if state.function == .battery && state.inputOn && recorder == nil {
                 r.updateDeviceCounters(capacity: state.batteryCapacity_mAh, time: state.batteryTime_s)
                 recorder = r
                 pollInterval = .milliseconds(Int(1000 / r.info.options.sampleRateHz.clamped(to: 0.5...10)))
+                beginSleepActivity()
             } else {
                 r.updateDeviceCounters(capacity: state.batteryCapacity_mAh, time: state.batteryTime_s)
                 r.finish(status: .interrupted, reason: .endedWhileDisconnected)
@@ -706,7 +753,24 @@ public final class DeviceSession {
     }
 
     /// Clears a finished run from the screen (files stay on disk).
-    public func dismissRun() { if recorder?.isActive != true { recorder = nil } }
+    public func dismissRun() {
+        if recorder?.isActive != true { recorder = nil; profileRunner = nil }
+    }
+
+    private func beginSleepActivity() {
+        guard sleepActivity == nil else { return }
+        sleepActivity = ProcessInfo.processInfo.beginActivity(
+            options: [.idleSystemSleepDisabled, .userInitiated],
+            reason: "LoadLab is recording a discharge run")
+    }
+
+    private func endSleepActivity() {
+        if let a = sleepActivity { ProcessInfo.processInfo.endActivity(a) }
+        sleepActivity = nil
+    }
+
+    /// True while the Mac is being kept awake for a run.
+    public var preventingSleep: Bool { sleepActivity != nil }
 
     // MARK: Console
 
@@ -732,6 +796,158 @@ public final class DeviceSession {
         if log.count > Self.logCapacity { log.removeFirst(log.count - Self.logCapacity) }
     }
     public func clearLog() { log.removeAll() }
+}
+
+// MARK: - Profiles (app-scripted discharges)
+
+extension DeviceSession {
+    public enum ProfileStartError: Error, Equatable, CustomStringConvertible {
+        case invalid([String]), belowCutoff(Double), couldNotPrepare(String)
+        public var description: String {
+            switch self {
+            case .invalid(let problems): problems.joined(separator: " ")
+            case .belowCutoff(let v): String(format: "The cell reads %.3f V, at or below the cut-off. Not starting.", v)
+            case .couldNotPrepare(let why): "Could not prepare the instrument: \(why)"
+            }
+        }
+    }
+
+    /// Starts an app-scripted profile: switches to Basic (static), sets ranges, arms the Von
+    /// failsafe, records, and hands control to a `ProfileRunner`.
+    public func startProfileRun(_ profile: Profile, cell: CellInfo) async throws {
+        guard link == .connected else { throw RunStartError.notConnected }
+        guard recorder?.isActive != true else { throw RunStartError.alreadyRunning }
+        let problems = profile.validate()
+        guard problems.isEmpty else { throw ProfileStartError.invalid(problems) }
+
+        if state.inputOn { await setInput(false) }
+        let saved = SavedBasic(
+            mode: state.mode, dynamic: state.dynamic,
+            modes: [LoadMode.cc, .cp, .cr].map {
+                SavedBasic.Mode(mode: $0, level: state[mode: $0].level,
+                                currentRange: state[mode: $0].currentRange, voltageRange: state[mode: $0].voltageRange)
+            },
+            resistanceRange: state.resistanceRange)
+
+        // Basic, static, the profile's ranges, and the first loaded step's mode.
+        let firstMode = profile.allSteps.first { [.hold, .pulse, .dcr].contains($0.kind) }?.mode ?? .cc
+        let ok = await perform("Prepare profile") { sdl in
+            if try await sdl.externalMode() != .internalControl { try await sdl.setExternalMode(.internalControl) }
+            for m in profile.modesUsed.union([firstMode]) {
+                try await sdl.setFunction(m.loadMode)
+                try await sdl.setCurrentRange(m.loadMode, profile.currentRange)
+                try await sdl.setVoltageRange(m.loadMode, profile.voltageRange)
+                guard try await sdl.currentRange(m.loadMode) == profile.currentRange,
+                      try await sdl.voltageRange(m.loadMode) == profile.voltageRange else {
+                    throw ProfileStartError.couldNotPrepare("range read-back differs for \(m.label)")
+                }
+            }
+            if profile.modesUsed.contains(.cr) { try await sdl.setResistanceRange(profile.resistanceRange) }
+            try await sdl.setFunction(firstMode.loadMode)
+            self.state.function = .basic
+            self.state.dynamic = false
+            self.state.mode = firstMode.loadMode
+            self.state.inputOn = try await sdl.inputOn()
+        }
+        guard ok, !state.inputOn else {
+            await restoreBasic(saved)
+            throw ProfileStartError.couldNotPrepare(lastError ?? "input did not stay off")
+        }
+
+        // The cell must be above the cut-off before anything starts.
+        guard let rest = try? await sdl.measureAll() else {
+            await restoreBasic(saved)
+            throw ProfileStartError.couldNotPrepare("no reading")
+        }
+        guard rest.voltage > profile.limits.cutoffVoltage else {
+            await restoreBasic(saved)
+            throw ProfileStartError.belowCutoff(rest.voltage)
+        }
+
+        var battery = BatteryConfig()
+        battery.mode = .cc
+        battery.level = profile.maxCCLevel
+        battery.currentRange = profile.currentRange
+        battery.voltageRange = profile.voltageRange
+        battery.stopVoltageEnabled = true
+        battery.stopVoltage = profile.limits.cutoffVoltage
+        var options = RecordingOptions()
+        options.sampleRateHz = profile.sampleRateHz
+        options.hardwareCutoff = true
+        options.hardwareCutoffMargin = profile.limits.hardwareMargin
+        var info = RunInfo(title: cell.name.isEmpty ? profile.name : "\(cell.name) · \(profile.name)", cell: cell,
+                           battery: battery, options: options, startedAt: Date())
+        info.kind = "profile"
+        info.profile = profile
+        info.savedBasic = saved
+        info.deviceModel = identity?.model
+        info.deviceSerial = identity?.serial
+        info.deviceFirmware = identity?.firmware
+        info.deviceHost = host
+
+        // Failsafe: Von just below the cut-off, latch off (always on for profiles).
+        info.savedVOn = state.vOn
+        info.savedVOnLatch = state.vOnLatch
+        let von = max(0, profile.limits.cutoffVoltage - profile.limits.hardwareMargin)
+        await setVOn(von)
+        await setVOnLatch(false)
+        guard abs(state.vOn - von) < 0.001, state.vOnLatch == false else {
+            await restoreVOn(info)
+            await restoreBasic(saved)
+            throw RunStartError.cutoffNotVerified
+        }
+
+        let r = try RunRecorder(info: info, store: runStore)
+        recorder = r
+        r.ingest(rest)
+        r.addEvent("safety", String(format: "Cut-off %.3f V · max %.3f A · Von %.3f V (latch off)",
+                                    profile.limits.cutoffVoltage, profile.limits.maxCurrent, von))
+        pollInterval = .milliseconds(Int(1000 / profile.sampleRateHz.clamped(to: 0.5...10)))
+        beginSleepActivity()
+        let runner = ProfileRunner(profile: profile, session: self, recorder: r, initialMode: firstMode)
+        profileRunner = runner
+        runner.start()
+    }
+
+    /// Per-sample watchdog for profile runs. Runs in the polling path, independent of the
+    /// runner's own timing.
+    func checkProfileSafety(_ m: Reading) async {
+        guard let p = profileRunner, p.isActive, let r = recorder, r.isActive else { return }
+        let l = p.profile.limits
+        if m.current > l.maxCurrent + l.currentTolerance {
+            r.addEvent("safety", String(format: "Current %.4f A above the %.3f A limit", m.current, l.maxCurrent))
+            await endRun(status: .stopped, reason: .currentLimit)
+        } else if m.current > RunAnalysis.currentFloor && m.voltage <= l.cutoffVoltage {
+            await endRun(status: .completed, reason: .voltageCutoff)
+        } else if let q = l.maxCapacity_mAh, r.integrator.capacity_mAh >= q {
+            await endRun(status: .completed, reason: .capacityLimit)
+        } else if let t = l.maxDuration_s, m.date.timeIntervalSince(r.info.startedAt) >= t {
+            await endRun(status: .completed, reason: .timeLimit)
+        }
+    }
+
+    /// The runner reached the end of its steps (or failed cleanly).
+    func profileFinished(status: RunStatus, reason: EndReason) async {
+        await endRun(status: status, reason: reason)
+    }
+
+    /// The runner switched the input; keeps the mirror current between status polls.
+    func noteProfileInput(_ on: Bool) { state.inputOn = on }
+
+    /// Puts back the Basic mode, levels and ranges a profile changed (input must be off).
+    func restoreBasic(_ b: SavedBasic) async {
+        await perform("Restore Basic settings") { sdl in
+            for m in b.modes {
+                if try await sdl.currentRange(m.mode) != m.currentRange { try await sdl.setCurrentRange(m.mode, m.currentRange) }
+                if try await sdl.voltageRange(m.mode) != m.voltageRange { try await sdl.setVoltageRange(m.mode, m.voltageRange) }
+                if abs(try await sdl.level(m.mode) - m.level) > 1e-9 { try await sdl.setLevel(m.mode, m.level) }
+            }
+            if try await sdl.resistanceRange() != b.resistanceRange { try await sdl.setResistanceRange(b.resistanceRange) }
+            if b.dynamic { try await sdl.setTransientFunction(b.mode) } else { try await sdl.setFunction(b.mode) }
+            self.state.dynamic = b.dynamic
+            try await self.refreshAll()
+        }
+    }
 }
 
 extension Comparable {
