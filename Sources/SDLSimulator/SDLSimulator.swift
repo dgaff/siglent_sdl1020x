@@ -61,6 +61,9 @@ public final class SDLSimulator: @unchecked Sendable {
     private var inputOn = false
     private var shortOn = false
     private var activeFunction = "BASIC"       // BASIC, BATTERY, LIST, PROGRAM, OCP, OPP
+    /// Dynamic (transient) operation active; not observable via SCPI on the real device.
+    private var dynamicActive = false
+    private var dynamicEpoch = Date()
     private var dischargedmAh = 0.0
     private var dischargeSeconds = 0.0
     private var lastTick = Date()
@@ -245,6 +248,14 @@ public final class SDLSimulator: @unchecked Sendable {
 
     private func level(for mode: String) -> Double {
         if activeFunction == "BATTERY" { return dbl(":BATT:LEV") }
+        if dynamicActive {
+            // Continuous transient: A for AWID seconds, then B for BWID seconds, repeating.
+            let key = [("CURRENT", ":CURR"), ("VOLTAGE", ":VOLT"), ("POWER", ":POW"), ("RESISTANCE", ":RES")]
+                .first { $0.0 == mode }?.1 ?? ":CURR"
+            let a = dbl("\(key):TRAN:AWID"), b = dbl("\(key):TRAN:BWID")
+            let phase = Date().timeIntervalSince(dynamicEpoch).truncatingRemainder(dividingBy: max(a + b, 1e-3))
+            return dbl(phase < a ? "\(key):TRAN:ALEV" : "\(key):TRAN:BLEV")
+        }
         switch mode {
         case "CURRENT": return dbl(":CURR")
         case "VOLTAGE": return dbl(":VOLT")
@@ -416,10 +427,21 @@ public final class SDLSimulator: @unchecked Sendable {
         let funcSet = Array(commands.suffix(2))
         commands.removeLast(2)
         command("[:SOURce]:FUNCtion") { [unowned self] a, q in
-            activeFunction = "BASIC"; return funcSet[0].1(a, q)
+            // Real SDL: selecting a function switches the input OFF.
+            activeFunction = "BASIC"; dynamicActive = false; inputOn = false
+            return funcSet[0].1(a, q)
         }
         commands.append(funcSet[1])
         setting("[:SOURce]:FUNCtion:TRANsient", key: ":FUNC:TRAN", .enumeration(Array(modes.prefix(4)), "CURRENT"))
+        let tranSet = Array(commands.suffix(2))
+        commands.removeLast(2)
+        command("[:SOURce]:FUNCtion:TRANsient") { [unowned self] a, q in
+            activeFunction = "BASIC"; dynamicActive = true; dynamicEpoch = Date(); inputOn = false
+            // Static mode follows the transient mode (both queries report the same name).
+            if let m = a.first { settings[":FUNC"] = modes.first { $0.hasPrefix(String(m.uppercased().prefix(3))) } ?? "CURRENT" }
+            return tranSet[0].1(a, q)
+        }
+        commands.append(tranSet[1])
 
         for (sub, key, lvl) in [("CURRent", ":CURR", 0.0), ("VOLTage", ":VOLT", 10.0), ("POWer", ":POW", 0.0), ("RESistance", ":RES", 1000.0)] {
             setting("[:SOURce]:\(sub)[:LEVel][:IMMediate]", key: key, .double(lvl))

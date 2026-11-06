@@ -52,3 +52,27 @@ Programming Guide (E02B). Everything here is enforced in code (SCPIKit/SDLKit) a
 
 ## Test rig
 - Keysight E36234A at 192.168.1.85, **output 2 only** → SDL input (polarity verified: SDL read 4.998 V at 5.000 V).
+
+## Dynamic (transient) operation — measured with the E36234A as source (10 V, 0.8 A limit)
+- `:FUNC:TRAN <mode>` enters dynamic operation; `:FUNC <mode>` returns to static. **Both switch the input OFF.**
+- **No query distinguishes static from dynamic**: `:FUNC?` and `:FUNC:TRAN?` both return the mode name in either state. The app tracks DYN itself (assumes static after connect).
+- Continuous mode works as expected (A 0.2 A / B 0.6 A, 0.5 s widths → load alternates).
+- Changing `:CURR:TRAN:MODE` while running does not change behaviour until dynamic mode is re-entered.
+- Static CC 0.300 A setpoint read back 0.299–0.300 A on the SDL and 0.29995 A on the PSU.
+
+## T2 results (E36234A output 2 as source, all currents < 1 A) — 2026-11-06
+| Test | Result |
+|---|---|
+| CC 0.5 A @ 10 V | SDL 0.4997 A / 9.958 V; PSU 0.4998 A / 9.998 V (≈ 40 mV lead drop) |
+| CR 20 Ω @ 10 V | 20.09 Ω (0.496 A) |
+| CP 4 W @ 10 V | 3.98 W |
+| CV 8 V vs PSU 10 V / 0.6 A | 8.005 V, 0.601 A (supply in current limit) |
+| Dynamic CC A 0.2 / B 0.6 A, 0.4 s | both levels observed by the app's poller |
+| Short vs PSU 5 V / 0.5 A | 0.501 A, 0.011 V |
+| Emergency off / mode change | current < 2 mA within 300 ms |
+| **Von 8 V, latch OFF** | 10 V → 0.300 A; **7 V → 0.0002 A**; 9 V → 0.300 A (resumes) |
+| Von 8 V, latch ON | keeps sinking 0.300 A at 7 V |
+
+**Safety consequence:** Von with latch **OFF** is a working hardware under-voltage stop that does not depend on the
+Mac or the network. Latch ON defeats it. The user's instrument default has latch **ON**, so battery profiles
+must set latch OFF explicitly and verify by read-back before switching the input on.

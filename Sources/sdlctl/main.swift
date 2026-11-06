@@ -19,7 +19,7 @@ USAGE: sdlctl <command> [options]
   restore <host> <file.json>        Restore settings saved with snapshot (input forced OFF)
   diff <host> <file.json>           Show settings that differ from a snapshot
   bench <host> [n]                  Query latency benchmark
-  sim [port]                        Run the SDL simulator (default port 5025)
+  sim [port] [--demo]               Run the SDL simulator (default port 5025)
 
 <host> may be host or host:port. Default host from $SDL_HOST.
 """
@@ -156,6 +156,13 @@ case "sim":
     sim.sourceVoltage = 12
     sim.sourceResistance = 0.1
     let bound = try await sim.start(port: port)
+    if args.contains("--demo") {
+        // A 2 Ah, 4.2 V → 3.0 V "battery" under a 1 A / 3 A dynamic CC load.
+        for line in ["SIM:BATTERY 2000,4.2,3.0", "SIM:SOURCE:RES 0.08", ":CURR:IRANG 30", ":CURR:TRAN:IRANG 30",
+                     ":CURR:TRAN:ALEV 1", ":CURR:TRAN:BLEV 3", ":CURR:TRAN:AWID 2", ":CURR:TRAN:BWID 1",
+                     ":FUNC:TRAN CURR", ":INP ON"] { _ = sim.execute(line: line) }
+        print("Demo: dynamic CC 1 A / 3 A on a simulated 2 Ah cell, input ON")
+    }
     print("SDL simulator listening on 127.0.0.1:\(bound) (source 12 V / 0.1 Ω). Ctrl-C to stop.")
     print("Sim-only commands: SIM:SOURCE:VOLT <v> | SIM:SOURCE:RES <ohm> | SIM:BATTERY <mAh>,<Vfull>,<Vempty> | SIM:BATTERY OFF")
     while true { try await Task.sleep(for: .seconds(3600)) }

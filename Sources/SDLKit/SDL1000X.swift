@@ -70,16 +70,16 @@ public final class SDL1000X: Sendable {
     public func measureExternal() async throws -> Double { try await queryDouble("MEAS:EXT?") }
 
     /// All four readings from the instrument (4 round-trips, ~80 ms).
-    public func measureAll() async throws -> Measurement {
+    public func measureAll() async throws -> Reading {
         let v = try await measureVoltage()
         let i = try await measureCurrent()
         let p = try await measurePower()
         let r = try await measureResistance()
-        return Measurement(voltage: v, current: i, power: p, resistance: r)
+        return Reading(voltage: v, current: i, power: p, resistance: r)
     }
 
     /// V and I only, P/R derived (2 round-trips, ~40 ms). Timestamp is the midpoint.
-    public func measureFast() async throws -> Measurement {
+    public func measureFast() async throws -> Reading {
         let t0 = Date()
         let v = try await measureVoltage()
         let i = try await measureCurrent()

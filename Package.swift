@@ -20,12 +20,15 @@ let package = Package(
         .target(name: "SDLSimulator", dependencies: ["SCPIKit"]),
         // Command-line tool: discovery, raw queries, monitoring, simulator.
         .executableTarget(name: "sdlctl", dependencies: ["SCPIKit", "SDLKit", "SDLSimulator"]),
+        // App logic (session, polling, history, discovery model); UI-free and testable.
+        .target(name: "LoadLabCore", dependencies: ["SCPIKit", "SDLKit"]),
         // SwiftUI app.
-        .executableTarget(name: "LoadLab", dependencies: ["SCPIKit", "SDLKit"]),
+        .executableTarget(name: "LoadLab", dependencies: ["LoadLabCore", "SCPIKit", "SDLKit"]),
 
         .testTarget(name: "SCPIKitTests", dependencies: ["SCPIKit", "SDLSimulator"]),
         .testTarget(name: "SDLKitTests", dependencies: ["SDLKit", "SCPIKit", "SDLSimulator"]),
+        .testTarget(name: "LoadLabCoreTests", dependencies: ["LoadLabCore", "SDLKit", "SCPIKit", "SDLSimulator"]),
         // Live-hardware tests; skipped unless SDL_HW_HOST is set.
-        .testTarget(name: "HardwareTests", dependencies: ["SDLKit", "SCPIKit"]),
+        .testTarget(name: "HardwareTests", dependencies: ["SDLKit", "SCPIKit", "LoadLabCore"]),
     ]
 )

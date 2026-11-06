@@ -223,3 +223,22 @@ I'll also `git init` the project at Phase 0, so every phase lands as reviewable 
 - **Deviations from the plan:** no Xcode project and no GRDB. Everything stays dependency-free and builds from the command line.
 - **Original settings** are saved at `hw-snapshots/original-2026-11-06.json` (git-ignored). The List/Program step tables (all at factory defaults) are documented in hardware-notes.
 - **Next:** Phase 2, the app shell and Basic pane, then T2 tests with the E36234A output 2 as the source.
+
+### 2026-11-06: Phase 2 done (pending your UX review)
+- **`LoadLabCore`** (`DeviceSession`, `AppModel`, `MeasurementHistory`) does the following:
+  - Owns the one SDL connection and polls V/I/P/R at 4 Hz.
+  - Refreshes status every second, which picks up front-panel function changes.
+  - Reconnects automatically with backoff, and reports "busy" if another program holds the SDL.
+  - Applies edits as clamp → confirmed write → read back.
+- **The app has these pieces:**
+  - Sidebar with instruments (scan, add by IP, recents) and functions.
+  - Readout bar with INPUT ON/OFF, Short, Trigger, and status chips.
+  - Basic pane: CC/CV/CP/CR/LED, dynamic mode, ranges, slew.
+  - Live stacked charts with min/max downsampling.
+  - Settings sheet: sense, Von/latch, protections, averaging, trigger, SoF, monitors.
+  - SCPI console window (⌥⌘K).
+  - Shortcuts: ⇧⌘I toggles the input, ⌘. is emergency off. Quitting the app switches the input off.
+- **Build:** `scripts/bundle.sh [--install]` produces `build/LoadLab.app`, ad-hoc signed.
+- **Tests:** 52 simulator/unit tests. The T2 hardware suite (9 tests, E36234A output 2, ≤ 0.8 A) is all green. **The Von latch-OFF cutoff is verified as a hardware under-voltage stop.**
+- **Dynamic-mode limitation:** the SDL has no query for static vs dynamic, so the app tracks it and assumes static after connecting.
+- **Open item:** macOS Local Network privacy blocks `LoadLab.app` until the user allows it. With ad-hoc signing, a rebuild may trigger the prompt again. A stable self-signed signing identity would avoid that.

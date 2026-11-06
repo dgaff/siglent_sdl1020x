@@ -8,6 +8,9 @@ public enum SCPIError: Error, Equatable, CustomStringConvertible {
     case connectionClosed
     case invalidResponse(command: String, response: String)
     case deviceError(code: Int, message: String)
+    /// macOS Local Network privacy is blocking this app (System Settings → Privacy & Security
+    /// → Local Network).
+    case localNetworkDenied
 
     public var description: String {
         switch self {
@@ -17,6 +20,7 @@ public enum SCPIError: Error, Equatable, CustomStringConvertible {
         case .connectionClosed: "Connection closed by instrument"
         case .invalidResponse(let cmd, let resp): "Unexpected reply to \(cmd): \(resp)"
         case .deviceError(let code, let msg): "Instrument error \(code): \(msg)"
+        case .localNetworkDenied: "macOS is blocking local network access for this app"
         }
     }
 }
@@ -95,8 +99,12 @@ public actor SCPIConnection {
                     once.resume(.failure(SCPIError.connectFailed(err.localizedDescription)))
                     Task { await self?.handleClosed() }
                 case .waiting(let err):
-                    // Host unreachable / refused: fail fast rather than waiting forever.
-                    once.resume(.failure(SCPIError.connectFailed(err.localizedDescription)))
+                    // Host unreachable / refused / blocked: fail fast rather than waiting forever.
+                    if conn.currentPath?.unsatisfiedReason == .localNetworkDenied || err == .posix(.ENETDOWN) {
+                        once.resume(.failure(SCPIError.localNetworkDenied))
+                    } else {
+                        once.resume(.failure(SCPIError.connectFailed(err.localizedDescription)))
+                    }
                 case .cancelled:
                     once.resume(.failure(SCPIError.connectionClosed))
                     Task { await self?.handleClosed() }

@@ -1,9 +1,9 @@
+*.xcuserstate
 .DS_Store
 .build/
-.swiftpm/
-build/
-*.xcuserstate
-xcuserdata/
 .recall/
-hw-snapshots/
+.swiftpm/
 .vscode/
+build/
+hw-snapshots/
+xcuserdata/

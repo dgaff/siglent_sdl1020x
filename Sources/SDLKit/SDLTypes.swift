@@ -136,7 +136,7 @@ public enum BatteryMode: String, Sendable, CaseIterable, Codable, Identifiable {
 }
 
 /// One reading of the main measurements.
-public struct Measurement: Sendable, Equatable, Codable {
+public struct Reading: Sendable, Equatable, Codable {
     public var voltage: Double
     public var current: Double
     public var power: Double
@@ -149,12 +149,12 @@ public struct Measurement: Sendable, Equatable, Codable {
     }
 
     /// Builds a reading from V and I only (P and R derived), for fast polling.
-    public static func derived(voltage v: Double, current i: Double, date: Date = Date()) -> Measurement {
-        Measurement(voltage: v, current: i, power: v * i,
+    public static func derived(voltage v: Double, current i: Double, date: Date = Date()) -> Reading {
+        Reading(voltage: v, current: i, power: v * i,
                     resistance: abs(i) > 1e-6 ? v / i : 0, date: date)
     }
 
-    public static let zero = Measurement(voltage: 0, current: 0, power: 0, resistance: 0)
+    public static let zero = Reading(voltage: 0, current: 0, power: 0, resistance: 0)
 }
 
 /// A List-function step.
