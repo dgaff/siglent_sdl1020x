@@ -237,4 +237,48 @@ struct HardwareT2Tests {
             print("OBSERVATION: latch ON below Von sinks \(below) A")
         }
     }
+
+    /// Phase 3: a full battery run, with the supply emulating a cell discharging through
+    /// the cut-off. The instrument must end the test; the app must record it correctly and
+    /// restore the user's Von/latch.
+    @Test func batteryRunEndsAtCutoff() async throws {
+        let store = RunStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("loadlab-hw-\(UUID().uuidString)"))
+        try await withRig(volts: 4.0, amps: 0.8) { s, psu in
+            s.runStore = store
+            let vOnBefore = s.state.vOn, latchBefore = s.state.vOnLatch
+            var c = BatteryConfig()
+            c.mode = .cc; c.currentRange = .low; c.voltageRange = .low; c.level = 0.5
+            c.stopVoltageEnabled = true; c.stopVoltage = 3.5
+            var cell = CellInfo(); cell.name = "PSU emulated cell"
+            var o = RecordingOptions(); o.sampleRateHz = 5
+            try await s.startBatteryRun(config: c, cell: cell, options: o)
+            #expect(s.state.inputOn)
+            #expect(abs(s.state.vOn - 3.4) < 0.001 && s.state.vOnLatch == false, "backup cut-off not armed")
+            let r = try #require(s.recorder)
+            try await Task.sleep(for: .seconds(4))
+            // "Discharge": step the supply down 4.0 → 3.3 V over ~7 s.
+            var v = 4.0
+            while v > 3.3, r.isActive {
+                v -= 0.05
+                try await psu.set(volts: v, amps: 0.8)
+                try await Task.sleep(for: .milliseconds(500))
+            }
+            for _ in 0..<20 where r.isActive { try await Task.sleep(for: .milliseconds(250)) }
+            print("T2 battery run: status \(r.info.status) reason \(String(describing: r.info.endReason)) "
+                  + "app \(r.info.summary.capacity_mAh) mAh device \(String(describing: r.info.summary.deviceCapacity_mAh)) mAh "
+                  + "samples \(r.samples.count) lastLoadedV \(String(describing: r.lastLoadedVoltage))")
+            #expect(r.info.status == .completed)
+            #expect(r.info.endReason == .voltageCutoff)
+            #expect(!s.state.inputOn)
+            #expect(s.state.vOn == vOnBefore && s.state.vOnLatch == latchBefore, "Von/latch not restored")
+            // 0.5 A for ~10–12 s ≈ 1.4–1.7 mAh; device counts whole mAh.
+            let dev = r.info.summary.deviceCapacity_mAh ?? -1
+            #expect(abs(r.info.summary.capacity_mAh - dev) < 1.0)
+            #expect(r.samples.count > 30)
+            let rows = try String(contentsOf: r.folder.appendingPathComponent("samples.csv"), encoding: .utf8)
+                .split(separator: "\n").count - 1
+            #expect(rows == r.samples.count)
+        }
+        try? FileManager.default.removeItem(at: store.root)
+    }
 }

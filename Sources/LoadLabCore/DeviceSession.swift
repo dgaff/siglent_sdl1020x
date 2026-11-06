@@ -40,13 +40,22 @@ public final class DeviceSession {
     public private(set) var log: [SCPILogEntry] = []
     public var logEnabled = true
 
-    /// Poll period for V/I/P/R. Every 4th tick also refreshes input/short/function status.
+    /// Poll period for V/I/P/R (status is refreshed about once a second regardless).
+    /// While recording, the run's sample rate sets this.
     public var pollInterval: Duration = .milliseconds(250)
+    /// Idle poll period, restored when a recording ends.
+    public var idlePollInterval: Duration = .milliseconds(250)
+
+    /// The active (or last finished) run. Only one at a time.
+    public private(set) var recorder: RunRecorder?
+    public var runStore = RunStore()
 
     public let sdl: SDL1000X
     private var pollTask: Task<Void, Never>?
-    private var tick = 0
+    private var lastStatus = ContinuousClock.now
     private static let logCapacity = 3000
+    /// Below this current, resistance readings are meaningless.
+    public static let resistanceCurrentFloor = 0.001
 
     public init(host: String, port: UInt16 = 5025) {
         self.host = host
@@ -73,6 +82,7 @@ public final class DeviceSession {
     }
 
     public func disconnect() async {
+        if let r = recorder, r.isActive { r.addEvent("disconnect", "LoadLab disconnected; the instrument continues on its own") }
         pollTask?.cancel()
         pollTask = nil
         await sdl.connection.disconnect()
@@ -129,11 +139,18 @@ public final class DeviceSession {
     private func pollOnce() async {
         guard link == .connected else { return }
         do {
-            let m = try await sdl.measureAll()
+            // Above 4 Hz read only V and I (2 round trips); P and R are derived.
+            var m = pollInterval < .milliseconds(250) ? try await sdl.measureFast() : try await sdl.measureAll()
+            // With (almost) no current, the SDL's resistance reading is V / noise. Report 0
+            // ("no reading") instead; the UI shows "—".
+            if abs(m.current) < Self.resistanceCurrentFloor { m.resistance = 0 }
             latest = m
             history.append(m)
-            tick += 1
-            if tick % 4 == 0 { try await refreshStatus() }
+            recorder?.ingest(m)
+            if ContinuousClock.now - lastStatus >= .seconds(1) {
+                lastStatus = ContinuousClock.now
+                try await refreshStatus()
+            }
         } catch {
             await handleLinkError(error)
         }
@@ -170,6 +187,7 @@ public final class DeviceSession {
                 try await openAndSync()
                 link = .connected
                 lastError = nil
+                if recorder?.isActive == true { recorder?.addEvent("reconnect", "Reconnected after: \(reason)") }
                 return
             } catch {
                 let delay = min(10.0, pow(2.0, Double(min(attempt, 4))) * 0.5)
@@ -226,7 +244,26 @@ public final class DeviceSession {
         s.voltageMonitor = try await sdl.voltageMonitor()
         s.externalMode = try await sdl.externalMode()
         if s.function != .basic { s.dynamic = false }
+        s.battery = try await readBattery()
+        s.batteryCapacity_mAh = try await sdl.batteryDischargedCapacity()
+        s.batteryTime_s = try await sdl.batteryDischargeTime()
         state = s
+    }
+
+    func readBattery() async throws -> BatteryConfig {
+        var c = BatteryConfig()
+        c.mode = try await sdl.batteryMode()
+        c.currentRange = try await sdl.batteryCurrentRange()
+        c.voltageRange = try await sdl.batteryVoltageRange()
+        c.resistanceRange = try await sdl.batteryResistanceRange() ?? .low
+        c.level = try await sdl.batteryLevel()
+        c.stopVoltageEnabled = try await sdl.batteryStopVoltageEnabled()
+        c.stopVoltage = try await sdl.batteryStopVoltage()
+        c.stopCapacityEnabled = try await sdl.batteryStopCapacityEnabled()
+        c.stopCapacity = try await sdl.batteryStopCapacity()
+        c.stopTimeEnabled = try await sdl.batteryStopTimeEnabled()
+        c.stopTime = try await sdl.batteryStopTime()
+        return c
     }
 
     private func readProtection(_ p: SDL1000X.Protection) async throws -> ProtectionConfig {
@@ -252,11 +289,25 @@ public final class DeviceSession {
         let input = try await sdl.inputOn()
         let short = try await sdl.shortOn()
         let fn = try await readFunction()
+        let wasOn = state.inputOn
         state.inputOn = input
         state.shortOn = short
         if fn != state.function {
             state.function = fn
             if fn != .basic { state.dynamic = false }
+        }
+        if fn == .battery {
+            state.batteryCapacity_mAh = try await sdl.batteryDischargedCapacity()
+            state.batteryTime_s = try await sdl.batteryDischargeTime()
+            recorder?.updateDeviceCounters(capacity: state.batteryCapacity_mAh, time: state.batteryTime_s)
+        }
+        // The instrument ended the test (stop condition, front panel, protection…).
+        if let r = recorder, r.isActive, wasOn, !input {
+            let reason = RunRecorder.inferEndReason(config: r.info.battery, lastVoltage: r.lastLoadedVoltage,
+                                                    deviceCapacity: state.batteryCapacity_mAh,
+                                                    deviceTime: state.batteryTime_s,
+                                                    restingVoltage: latest?.voltage)
+            await endRun(status: .completed, reason: reason)
         }
     }
 
@@ -282,6 +333,7 @@ public final class DeviceSession {
             try await sdl.setInput(on)
             self.state.inputOn = try await sdl.inputOn()
         }
+        if !on { await endRun(status: .stopped, reason: .userStopped) }
     }
 
     /// Input OFF, bypassing the `.connected` guard so it works mid-reconnect if possible.
@@ -292,6 +344,7 @@ public final class DeviceSession {
         } catch {
             lastError = "EMERGENCY OFF FAILED: \(error) — switch the input off at the instrument"
         }
+        await endRun(status: .stopped, reason: .userStopped)
     }
 
     public func setShort(_ on: Bool) async {
@@ -491,6 +544,156 @@ public final class DeviceSession {
             self.state.voltageMonitor = try await sdl.voltageMonitor()
         }
     }
+
+    // MARK: Battery
+
+    /// Switches the instrument to the Battery function (input turns off).
+    public func enterBattery() async {
+        await perform("Enter Battery") { sdl in
+            try await sdl.enterBattery()
+            self.state.function = .battery
+            self.state.dynamic = false
+            self.state.inputOn = try await sdl.inputOn()
+            self.state.battery = try await self.readBattery()
+        }
+    }
+
+    /// Writes battery settings that differ from the instrument's, then reads them all back.
+    @discardableResult
+    public func applyBattery(_ wanted: BatteryConfig) async -> Bool {
+        var c = wanted
+        c.level = c.level.clamped(to: c.levelRange)
+        c.stopVoltage = max(0, c.stopVoltage)
+        c.stopCapacity = max(0, c.stopCapacity)
+        c.stopTime = max(0, c.stopTime)
+        let have = state.battery
+        return await perform("Battery settings") { sdl in
+            if c.mode != have.mode { try await sdl.setBatteryMode(c.mode) }
+            if c.currentRange != have.currentRange { try await sdl.setBatteryCurrentRange(c.currentRange) }
+            if c.voltageRange != have.voltageRange { try await sdl.setBatteryVoltageRange(c.voltageRange) }
+            if c.mode == .cr, c.resistanceRange != have.resistanceRange { try await sdl.setBatteryResistanceRange(c.resistanceRange) }
+            if c.level != have.level { try await sdl.setBatteryLevel(c.level) }
+            if c.stopVoltage != have.stopVoltage { try await sdl.setBatteryStopVoltage(c.stopVoltage) }
+            if c.stopCapacity != have.stopCapacity { try await sdl.setBatteryStopCapacity(c.stopCapacity) }
+            if c.stopTime != have.stopTime { try await sdl.setBatteryStopTime(c.stopTime) }
+            if c.stopVoltageEnabled != have.stopVoltageEnabled { try await sdl.setBatteryStopVoltageEnabled(c.stopVoltageEnabled) }
+            if c.stopCapacityEnabled != have.stopCapacityEnabled { try await sdl.setBatteryStopCapacityEnabled(c.stopCapacityEnabled) }
+            if c.stopTimeEnabled != have.stopTimeEnabled { try await sdl.setBatteryStopTimeEnabled(c.stopTimeEnabled) }
+            self.state.battery = try await self.readBattery()
+        }
+    }
+
+    public enum RunStartError: Error, Equatable, CustomStringConvertible {
+        case notConnected, alreadyRunning, noStopCondition, settingsRejected(String), cutoffNotVerified, inputDidNotStart
+        public var description: String {
+            switch self {
+            case .notConnected: "Not connected"
+            case .alreadyRunning: "A run is already in progress"
+            case .noStopCondition: "Enable at least one stop condition (voltage, capacity or time)"
+            case .settingsRejected(let why): "The instrument did not accept the settings: \(why)"
+            case .cutoffNotVerified: "Could not verify the hardware cut-off (Von / latch off); not starting"
+            case .inputDidNotStart: "The input did not switch on (is the battery voltage above Von?)"
+            }
+        }
+    }
+
+    /// Starts a battery discharge run: applies and verifies settings, arms the hardware
+    /// cut-off, opens the recording, and switches the input on.
+    public func startBatteryRun(config: BatteryConfig, cell: CellInfo, options: RecordingOptions) async throws {
+        guard link == .connected else { throw RunStartError.notConnected }
+        guard recorder?.isActive != true else { throw RunStartError.alreadyRunning }
+        guard config.hasStopCondition else { throw RunStartError.noStopCondition }
+
+        if state.inputOn { await setInput(false) }
+        if state.function != .battery { await enterBattery() }
+        guard state.function == .battery else { throw RunStartError.settingsRejected(lastError ?? "could not enter Battery") }
+        guard await applyBattery(config) else { throw RunStartError.settingsRejected(lastError ?? "write failed") }
+        let applied = state.battery
+        guard applied.mode == config.mode, applied.stopVoltageEnabled == config.stopVoltageEnabled,
+              applied.stopCapacityEnabled == config.stopCapacityEnabled, applied.stopTimeEnabled == config.stopTimeEnabled,
+              abs(applied.stopVoltage - config.stopVoltage) < 0.001 else {
+            throw RunStartError.settingsRejected("read-back differs")
+        }
+
+        var info = RunInfo(title: cell.name.isEmpty ? "Battery test" : cell.name, cell: cell, battery: applied,
+                           options: options, startedAt: Date())
+        info.deviceModel = identity?.model
+        info.deviceSerial = identity?.serial
+        info.deviceFirmware = identity?.firmware
+        info.deviceHost = host
+
+        // Hardware cut-off: Von just below V_Stop with latch OFF stops the load even if the
+        // Mac sleeps or the network drops (verified on hardware: < 1 mA below Von).
+        if options.hardwareCutoff && applied.stopVoltageEnabled {
+            info.savedVOn = state.vOn
+            info.savedVOnLatch = state.vOnLatch
+            let von = max(0, applied.stopVoltage - options.hardwareCutoffMargin)
+            await setVOn(von)
+            await setVOnLatch(false)
+            guard abs(state.vOn - von) < 0.001, state.vOnLatch == false else {
+                await restoreVOn(info)
+                throw RunStartError.cutoffNotVerified
+            }
+        }
+
+        let r = try RunRecorder(info: info, store: runStore)
+        recorder = r
+        pollInterval = .milliseconds(Int(1000 / options.sampleRateHz.clamped(to: 0.5...10)))
+        await setInput(true)
+        guard state.inputOn else {
+            r.finish(status: .failed, reason: .error)
+            await restoreVOn(r.info)
+            pollInterval = idlePollInterval
+            throw RunStartError.inputDidNotStart
+        }
+        r.addEvent("input", String(format: "Input on: %@ %.3f %@", applied.mode.label, applied.level, applied.mode.unit))
+    }
+
+    /// Stops the run from the app (input OFF first).
+    public func stopRun() async {
+        await emergencyOff()
+        await endRun(status: .stopped, reason: .userStopped)
+    }
+
+    private func endRun(status: RunStatus, reason: EndReason) async {
+        guard let r = recorder, r.isActive else { return }
+        if state.function == .battery {
+            if let c = try? await sdl.batteryDischargedCapacity(), let t = try? await sdl.batteryDischargeTime() {
+                r.updateDeviceCounters(capacity: c, time: t)
+            }
+        }
+        r.finish(status: status, reason: reason)
+        await restoreVOn(r.info)
+        pollInterval = idlePollInterval
+    }
+
+    private func restoreVOn(_ info: RunInfo) async {
+        if let v = info.savedVOn { await setVOn(v) }
+        if let l = info.savedVOnLatch { await setVOnLatch(l) }
+    }
+
+    /// After connecting: re-attach to a run this instrument was doing when LoadLab quit.
+    /// If the instrument is still discharging, recording resumes; otherwise the run is closed
+    /// with the instrument's (persisted) counters as the final figures.
+    public func resumeInterruptedRuns() async {
+        guard link == .connected, recorder == nil else { return }
+        for (folder, _) in runStore.runningRuns(serial: identity?.serial) {
+            guard let r = try? RunRecorder(resuming: folder, store: runStore) else { continue }
+            if state.function == .battery && state.inputOn && recorder == nil {
+                r.updateDeviceCounters(capacity: state.batteryCapacity_mAh, time: state.batteryTime_s)
+                recorder = r
+                pollInterval = .milliseconds(Int(1000 / r.info.options.sampleRateHz.clamped(to: 0.5...10)))
+            } else {
+                r.updateDeviceCounters(capacity: state.batteryCapacity_mAh, time: state.batteryTime_s)
+                r.finish(status: .interrupted, reason: .endedWhileDisconnected)
+                await restoreVOn(r.info)
+                if recorder == nil { recorder = r }
+            }
+        }
+    }
+
+    /// Clears a finished run from the screen (files stay on disk).
+    public func dismissRun() { if recorder?.isActive != true { recorder = nil } }
 
     // MARK: Console
 

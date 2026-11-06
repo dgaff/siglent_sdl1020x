@@ -55,6 +55,12 @@ public struct DeviceState: Equatable, Sendable {
     public var ledCurrent = 0.0
     public var ledRco = 0.2
 
+    // Battery function
+    public var battery = BatteryConfig()
+    /// Instrument's discharge counters (reset at each start; 1 mAh / 1 s resolution).
+    public var batteryCapacity_mAh = 0.0
+    public var batteryTime_s = 0.0
+
     // System / utility
     public var sense = false
     public var vOn = 0.0

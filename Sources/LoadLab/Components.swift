@@ -37,9 +37,10 @@ struct NumericField: View {
             HStack(spacing: 6) {
                 TextField(label, text: $text)
                     .labelsHidden()
+                    .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.trailing)
                     .monospacedDigit()
-                    .frame(width: 96)
+                    .frame(width: 110)
                     .focused($focused)
                     .disabled(disabled)
                     .onSubmit { submit() }
@@ -47,13 +48,25 @@ struct NumericField: View {
                         if f { editing = true } else if editing { submit() }
                     }
                 Text(unit).foregroundStyle(.secondary).frame(minWidth: 34, alignment: .leading)
+                // Visible "apply" affordance once the text differs from the instrument's value.
+                Button { submit() } label: { Image(systemName: "return") }
+                    .buttonStyle(.borderless)
+                    .help("Apply (Return)")
+                    .opacity(isModified ? 1 : 0)
+                    .disabled(!isModified)
             }
         } label: {
             Text(label)
         }
-        .help(range.map { "Range \(format($0.lowerBound)) – \(format($0.upperBound)) \(unit)" } ?? "")
+        .help("Click to edit, then press Return to send to the instrument"
+              + (range.map { ". Range \(format($0.lowerBound)) – \(format($0.upperBound)) \(unit)" } ?? ""))
         .onAppear { text = format(value) }
         .onChange(of: value) { _, v in if !editing { text = format(v) } }
+    }
+
+    private var isModified: Bool {
+        guard let v = Double(text.replacingOccurrences(of: ",", with: ".")) else { return !text.isEmpty }
+        return abs(v - value) >= pow(10, -Double(digits + 1))
     }
 
     private func format(_ v: Double) -> String { v.formatted(.number.precision(.fractionLength(digits)).grouping(.never)) }
@@ -88,6 +101,7 @@ struct ReadoutTile: View {
             }
         }
         .frame(minWidth: 132, alignment: .leading)
+        .help(quantity == .resistance ? "V ÷ I. Shown as — when no current is flowing." : "")
     }
 
     static func format(_ v: Double, _ q: Quantity) -> String {

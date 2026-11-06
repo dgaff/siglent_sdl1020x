@@ -45,7 +45,7 @@ struct SidebarView: View {
                 ForEach([ActiveFunction.basic, .battery, .list, .program, .ocpt, .ext]) { f in
                     Label(f == .ocpt ? "OCPT / OPPT" : f.label, systemImage: f.symbol)
                         .tag(SidebarItem.function(f))
-                        .badge(isActive(f) ? Text("active") : nil)
+                        .badge(f == .battery && app.session?.recorder?.isActive == true ? Text("● rec") : isActive(f) ? Text("active") : nil)
                 }
             }
         }

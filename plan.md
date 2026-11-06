@@ -242,3 +242,23 @@ I'll also `git init` the project at Phase 0, so every phase lands as reviewable 
 - **Tests:** 52 simulator/unit tests. The T2 hardware suite (9 tests, E36234A output 2, ≤ 0.8 A) is all green. **The Von latch-OFF cutoff is verified as a hardware under-voltage stop.**
 - **Dynamic-mode limitation:** the SDL has no query for static vs dynamic, so the app tracks it and assumes static after connecting.
 - **Open item:** macOS Local Network privacy blocks `LoadLab.app` until the user allows it. With ad-hoc signing, a rebuild may trigger the prompt again. A stable self-signed signing identity would avoid that.
+
+### 2026-11-06: UX tweaks and Phase 3 done
+- **UX tweaks:**
+  - Bordered entry fields, with an apply (↩) button that appears once you've typed a change, plus a footer hint.
+  - The live chart now defaults to "All".
+  - Resistance shows "—" and is left off the chart when |I| < 1 mA. Before, the SDL reported V divided by noise.
+- **Battery screen:**
+  - Setup form: cell info, CC/CP/CR with C-rate helpers, ranges, V/C/T stop conditions with a chemistry cut-off suggestion, sample rate (0.5–10 Hz), and the backup hardware cut-off.
+  - Confirmation dialog, then a run dashboard: live stats with the app mAh vs the instrument count, % of nominal, ETA, three charts, events and notes.
+- **Recording:**
+  - Each run goes to `~/Documents/LoadLab/Runs/<date>_<name>/` as `samples.csv` (streamed, flushed about every second) plus `run.json` (metadata, settings, events, summary).
+  - Gaps are logged. In-session reconnects continue the same run.
+  - **After an app restart,** the run resumes if the SDL is still discharging. If the SDL finished meanwhile, the run is closed as "interrupted" using the SDL's counters.
+- **Safety:**
+  - A start refuses without a stop condition, and verifies the settings by read-back.
+  - Arms Von = V_Stop − 0.1 V with latch OFF for the run, and restores the user's Von and latch afterwards.
+  - Switching the input off by any route ends the run as "stopped by user".
+- **Tests:** 60 simulator/unit tests and 10 T2 hardware tests, all green.
+- **Deferred:** the DCR sub-tab. There's no SCPI command to enter DCR mode, so DCR will be done app-side in the Phase 5 profile engine (pulse IR measurement).
+- **Next:** Phase 4, the run library (index the run folders, browse, overlay, analysis).

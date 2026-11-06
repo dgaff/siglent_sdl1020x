@@ -1,5 +1,6 @@
 import SwiftUI
 import LoadLabCore
+import SDLKit
 
 struct ContentView: View {
     @Bindable var app: AppModel
@@ -41,6 +42,16 @@ struct ContentView: View {
                 let host = String(parts[0]), port = parts.count > 1 ? UInt16(parts[1]) ?? 5025 : 5025
                 app.upsert(host: host, port: port)
                 if let d = app.devices.first(where: { $0.host == host && $0.port == port }) { await app.connect(d) }
+                // Test hook: auto-start a demo run, only ever against the simulator.
+                if ProcessInfo.processInfo.environment["LOADLAB_DEMO_RUN"] == "1",
+                   let s = app.session, s.identity?.serial.hasPrefix("SIM") == true {
+                    var c = BatteryConfig(); c.mode = .cc; c.level = 1.5; c.currentRange = .high; c.voltageRange = .low
+                    c.stopVoltageEnabled = true; c.stopVoltage = 3.0
+                    var cell = CellInfo(); cell.name = "Demo 18650"; cell.nominalCapacity_mAh = 60
+                    var o = RecordingOptions(); o.sampleRateHz = 5
+                    try? await s.startBatteryRun(config: c, cell: cell, options: o)
+                    app.selectedFunction = .battery
+                }
             } else if app.devices.isEmpty {
                 await app.scan()
             }
@@ -66,7 +77,8 @@ struct ContentView: View {
                 VSplitView {
                     functionPane(session)
                         .frame(minHeight: 220)
-                    if chartVisible {
+                    // The battery run dashboard has its own charts.
+                    if chartVisible && !(app.selectedFunction == .battery && session.recorder != nil) {
                         LiveChartView(session: session)
                             .frame(minHeight: 180, idealHeight: 300)
                     }
@@ -79,7 +91,7 @@ struct ContentView: View {
     private func functionPane(_ session: DeviceSession) -> some View {
         switch app.selectedFunction {
         case .basic: BasicPane(session: session)
-        case .battery: ComingSoon(function: .battery, phase: 3, session: session)
+        case .battery: BatteryPane(session: session)
         case .list: ComingSoon(function: .list, phase: 6, session: session)
         case .program: ComingSoon(function: .program, phase: 6, session: session)
         case .ocpt, .oppt: ComingSoon(function: .ocpt, phase: 6, session: session)

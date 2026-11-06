@@ -7,7 +7,7 @@ import LoadLabCore
 struct LiveChartView: View {
     let session: DeviceSession
 
-    @AppStorage("chart.window") private var windowSeconds: Double = 60
+    @AppStorage("chart.windowSeconds") private var windowSeconds: Double = 0   // 0 = All
     @AppStorage("chart.showV") private var showV = true
     @AppStorage("chart.showI") private var showI = true
     @AppStorage("chart.showP") private var showP = false
@@ -82,7 +82,13 @@ private struct QuantityChart: View {
     let quantity: Quantity
     let samples: [Sample]
 
+    /// Resistance has no meaning without current (stored as 0): leave those points out.
+    private var plotted: [Sample] {
+        quantity == .resistance ? samples.filter { $0.resistance != 0 } : samples
+    }
+
     var body: some View {
+        let samples = plotted
         let values = samples.map { $0.value(quantity) }
         let lo = values.min() ?? 0, hi = values.max() ?? 1
         // Flat signals would collapse the axis; enforce a minimum visible span.

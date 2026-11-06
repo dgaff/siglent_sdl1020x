@@ -9,11 +9,16 @@ struct BasicPane: View {
     private var s: DeviceState { session.state }
     private var mode: LoadMode { s.mode }
     private var config: ModeConfig { s[mode: mode] }
-    private var usable: Bool { session.link.isUsable && s.function == .basic }
+    private var usable: Bool { session.link.isUsable && s.function == .basic && session.recorder?.isActive != true }
 
     var body: some View {
         Form {
-            if s.function != .basic {
+            if session.recorder?.isActive == true {
+                Section {
+                    Label("A battery test is recording. Basic settings are locked until it ends.", systemImage: "record.circle")
+                        .foregroundStyle(.red)
+                }
+            } else if s.function != .basic {
                 Section {
                     HStack {
                         Label("The instrument is running the \(s.function.label) function.", systemImage: "info.circle")
@@ -71,13 +76,18 @@ struct BasicPane: View {
             } else if s.dynamic {
                 dynamicSection
             } else {
-                Section("Setpoint") {
+                Section {
                     NumericField(label: mode.levelLabel, value: config.level, unit: mode.unit,
                                  digits: mode == .cr ? 3 : 3,
                                  range: SDLLimits.level(mode, currentRange: config.currentRange, voltageRange: config.voltageRange)) {
                         await session.setLevel(mode, $0)
                     }
                     if mode == .cc { slewFields }
+                } header: {
+                    Text("Setpoint")
+                } footer: {
+                    Text("Type a value and press Return to send it. The field then shows what the instrument accepted (values are kept within its limits).")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
             }

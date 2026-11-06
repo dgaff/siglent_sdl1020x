@@ -89,10 +89,11 @@ public final class AppModel {
         let s = DeviceSession(host: device.host, port: device.port)
         session = s
         await s.connect()
+        await s.resumeInterruptedRuns()
         if let id = s.identity {
             upsert(host: device.host, port: device.port, model: id.model, serial: id.serial)
         }
-        selectedFunction = s.state.function
+        selectedFunction = s.recorder != nil ? .battery : s.state.function
     }
 
     public func disconnect() async {

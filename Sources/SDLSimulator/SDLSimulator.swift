@@ -200,6 +200,7 @@ public final class SDLSimulator: @unchecked Sendable {
             if m.arguments.count == 3, let c = Double(m.arguments[0]), let fv = Double(m.arguments[1]), let ev = Double(m.arguments[2]) {
                 _battery = BatteryModel(capacity_mAh: c, fullVoltage: fv, emptyVoltage: ev)
                 _sourceVoltage = fv
+                batteryDrawn_mAh = 0      // a fresh, full cell
             } else { _battery = nil }
         default: break
         }

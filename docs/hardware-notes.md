@@ -76,3 +76,10 @@ Programming Guide (E02B). Everything here is enforced in code (SCPIKit/SDLKit) a
 **Safety consequence:** Von with latch **OFF** is a working hardware under-voltage stop that does not depend on the
 Mac or the network. Latch ON defeats it. The user's instrument default has latch **ON**, so battery profiles
 must set latch OFF explicitly and verify by read-back before switching the input on.
+
+## Battery function (measured with the E36234A emulating a cell)
+- `:INP ON` while in Battery starts the test; **`DISCHA:CAP`/`DISCHA:TIM` reset at every start** and stay readable after the test ends (until the next start).
+- Counters are **integers: 1 mAh and 1 s resolution** (0.83 mAh still reads 0). LoadLab integrates V·I itself (trapezoidal, sub-mAh) and keeps the instrument count as a cross-check / fallback.
+- V_Stop ends the test (input OFF) within ~1.5 s of the voltage falling below it; C_Stop ended a 0.5 A run at 15 s (2.08 mAh actual, counter 2).
+- The instrument does not report *why* it stopped. LoadLab infers it: voltage cut-off if the last loaded reading was within 10 % of V_Stop or the relaxed voltage is at/below V_Stop; otherwise capacity/time limits by counter; else "input switched off".
+- Phase 3 T2 run (CC 0.5 A, V_Stop 3.5 V, supply ramped 4.0 → 3.3 V): completed by voltage cut-off at 3.516 V loaded; app 1.25 mAh vs counter 1 mAh; backup Von 3.4 V / latch OFF armed during the run and the user's Von/latch restored afterwards.
