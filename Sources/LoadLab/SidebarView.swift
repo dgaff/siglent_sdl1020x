@@ -10,19 +10,19 @@ struct SidebarView: View {
     @Bindable var app: AppModel
     @State private var showAdd = false
     @State private var newHost = ""
+    @State private var selection: SidebarDestination?
+
+    private var modelDestination: SidebarDestination {
+        if app.showingLibrary { return .library }
+        // OPPT shares the OCPT row.
+        return .function(app.selectedFunction == .oppt ? .ocpt : app.selectedFunction)
+    }
 
     var body: some View {
-        // Selection type and row tags must match exactly (both `SidebarDestination?`), or macOS
-        // SwiftUI silently ignores clicks.
-        List(selection: Binding<SidebarDestination?>(
-            get: { app.showingLibrary ? .library : .function(app.selectedFunction) },
-            set: {
-                switch $0 {
-                case .library?: app.showingLibrary = true
-                case .function(let f)?: app.showingLibrary = false; app.selectedFunction = f
-                case nil: break
-                }
-            })) {
+        // Row tags are plain `SidebarDestination` (not Optional): on this macOS, Optional-wrapped
+        // tags never match and every click is silently ignored. Checked with an accessibility
+        // selection test (select a row, read back which row is selected).
+        List(selection: $selection) {
             Section {
                 ForEach(app.devices) { d in
                     // No tap gestures in this List: on macOS they swallow the List's own clicks
@@ -56,17 +56,28 @@ struct SidebarView: View {
                 ForEach([ActiveFunction.basic, .battery, .list, .program, .ocpt, .ext], id: \.self) { f in
                     Label(f == .ocpt ? "OCPT / OPPT" : f.label, systemImage: f.symbol)
                         .badge(f == .battery && app.session?.recorder?.isActive == true ? Text("● rec") : isActive(f) ? Text("active") : nil)
-                        .tag(Optional(SidebarDestination.function(f)))
+                        .tag(SidebarDestination.function(f))
                 }
             }
 
             Section("Library") {
                 Label("Runs", systemImage: "books.vertical")
                     .badge(app.library.entries.isEmpty ? nil : Text("\(app.library.entries.count)"))
-                    .tag(Optional(SidebarDestination.library))
+                    .tag(SidebarDestination.library)
             }
         }
         .listStyle(.sidebar)
+        .onAppear { selection = modelDestination }
+        // Model → sidebar (e.g. connecting jumps to the instrument's active function).
+        .onChange(of: modelDestination) { _, new in if selection != new { selection = new } }
+        // Sidebar → model.
+        .onChange(of: selection) { _, new in
+            switch new {
+            case .library?: app.showingLibrary = true
+            case .function(let f)?: app.showingLibrary = false; app.selectedFunction = f
+            case nil: break
+            }
+        }
         .task { await app.library.reload() }
         .sheet(isPresented: $showAdd) { addSheet }
     }
