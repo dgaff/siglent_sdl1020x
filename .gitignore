@@ -1,0 +1,9 @@
+.DS_Store
+.build/
+.swiftpm/
+build/
+*.xcuserstate
+xcuserdata/
+.recall/
+hw-snapshots/
+.vscode/
