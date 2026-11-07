@@ -104,6 +104,31 @@ import SDLSimulator
         await s.disconnect()
     }
 
+    /// Regression (hardware, Anker power bank): the source shut off, 5 V → 0 V in one step.
+    /// The Von backstop held the load at 0 A, so the instrument's V_Stop never fired and the
+    /// input stayed ON. LoadLab must end the run itself and switch the input off.
+    @Test func sourceCollapseBelowVonEndsRun() async throws {
+        let sim = SDLSimulator()
+        try await sim.start(); defer { sim.stop() }
+        sim.sourceVoltage = 5.0
+        sim.sourceResistance = 0.02
+        let s = await session(port: sim.port, store: tempStore())
+        await s.setVOn(0.5); await s.setVOnLatch(true)
+        var c = ccConfig(1); c.stopVoltageEnabled = true; c.stopVoltage = 4.0
+        var opts = RecordingOptions(); opts.sampleRateHz = 10
+        try await s.startBatteryRun(config: c, cell: CellInfo(), options: opts)
+        let r = try #require(s.recorder)
+        try await Task.sleep(for: .seconds(1))
+        #expect(r.isActive)
+        sim.sourceVoltage = 0.001                               // the bank shuts its output off
+        #expect(await waitUntil(.seconds(5)) { !r.isActive })
+        #expect(r.info.status == .completed && r.info.endReason == .voltageCutoff)
+        #expect(r.info.events.contains { $0.kind == "safety" })   // LoadLab ended it, not the instrument
+        #expect(!s.state.inputOn)
+        #expect(s.state.vOn == 0.5 && s.state.vOnLatch == true)
+        await s.disconnect()
+    }
+
     @Test func userStop() async throws {
         let sim = try await cellSim(); defer { sim.stop() }
         let s = await session(port: sim.port, store: tempStore())

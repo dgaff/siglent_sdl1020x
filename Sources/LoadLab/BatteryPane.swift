@@ -383,7 +383,9 @@ private struct RunChart: View {
             switch kind {
             case .vVsCapacity:
                 Chart {
-                    ForEach(samples.filter { $0.current > 0.001 }) {
+                    // Loaded samples only (the rest tail after the cut-off relaxes upward), plus
+                    // unloaded ones below the cut-off, so a source that collapses shows its drop.
+                    ForEach(samples.filter { s in s.current > 0.001 || cutoff.map { s.voltage < $0 } == true }) {
                         LineMark(x: .value("Capacity (mAh)", $0.capacity_mAh), y: .value("Voltage (V)", $0.voltage))
                             .foregroundStyle(Color.blue)
                     }

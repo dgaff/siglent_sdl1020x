@@ -373,8 +373,11 @@ public final class SDLSimulator: @unchecked Sendable {
         let (v, i) = operatingPoint()
         if activeFunction == "BATTERY" {
             dischargedmAh += i * dt / 3.6
-            dischargeSeconds += dt
-            let vStop = bool(":BATT:VOLT:STAT") && v <= dbl(":BATT:VOLT")
+            // Measured: with the load held off (source below Von) the test pauses: the timer
+            // stops and V_Stop is not checked, so the input stays ON (hardware-notes).
+            let sinking = i > 0
+            if sinking { dischargeSeconds += dt }
+            let vStop = sinking && bool(":BATT:VOLT:STAT") && v <= dbl(":BATT:VOLT")
             let cStop = bool(":BATT:CAP:STAT") && dischargedmAh >= dbl(":BATT:CAP")
             let tStop = bool(":BATT:TIM:STAT") && dischargeSeconds >= dbl(":BATT:TIM")
             if vStop || cStop || tStop { inputOn = false }

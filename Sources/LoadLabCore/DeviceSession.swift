@@ -61,6 +61,11 @@ public final class DeviceSession {
     public static let sequenceOverrun: Double = 3
     /// Results are being collected; the run shows as running until they're in.
     var sequenceFinishing = false
+    /// Consecutive readings at or below the run's cut-off with no current flowing (the Von
+    /// backstop is holding the load off), per run. See `checkCutoffWatchdog`.
+    private var unloadedBelowCutoff: (run: ObjectIdentifier, count: Int)?
+    /// Readings in a row at/below the cut-off, unloaded, before LoadLab ends the run itself.
+    public static let cutoffConfirmReadings = 2
     /// Keeps the Mac from idle-sleeping while a run is active.
     private var sleepActivity: NSObjectProtocol?
     public var runStore = RunStore()
@@ -166,6 +171,7 @@ public final class DeviceSession {
             history.append(m)
             recorder?.ingest(m)
             if profileRunner?.isActive == true { await checkProfileSafety(m) }
+            else if let r = recorder, r.isActive, r.info.kind == "battery" { await checkBatteryCutoff(m) }
             if sequence?.phase == .running, sequence?.function == .ocpt || sequence?.function == .oppt { sequence?.trace.append(m) }
             if ContinuousClock.now - lastStatus >= .seconds(1) {
                 lastStatus = ContinuousClock.now
@@ -962,11 +968,54 @@ extension DeviceSession {
             await endRun(status: .stopped, reason: .currentLimit)
         } else if m.current > RunAnalysis.currentFloor && m.voltage <= l.cutoffVoltage {
             await endRun(status: .completed, reason: .voltageCutoff)
+        } else if await checkCutoffWatchdog(m, cutoff: l.cutoffVoltage, run: r) {
+            return
         } else if let q = l.maxCapacity_mAh, r.integrator.capacity_mAh >= q {
             await endRun(status: .completed, reason: .capacityLimit)
         } else if let t = l.maxDuration_s, m.date.timeIntervalSince(r.info.startedAt) >= t {
             await endRun(status: .completed, reason: .timeLimit)
         }
+    }
+
+    /// Watchdog for Battery-function runs. The instrument's V_Stop handles the normal case
+    /// (voltage falls under load); this covers a source that drops below the cut-off with no
+    /// current flowing, which the instrument never stops on (see `checkCutoffWatchdog`).
+    func checkBatteryCutoff(_ m: Reading) async {
+        guard let r = recorder, r.isActive, r.info.battery.stopVoltageEnabled, state.inputOn else { return }
+        await checkCutoffWatchdog(m, cutoff: r.info.battery.stopVoltage, run: r)
+    }
+
+    /// Ends the run when the voltage sits at/below the cut-off with no current flowing for
+    /// `cutoffConfirmReadings` readings in a row. Returns true if it ended the run.
+    ///
+    /// Seen on hardware (2026-11-07, Anker USB power bank, CC 1 A, V_Stop 4.0 V): the bank
+    /// shut its output off, 4.98 V → 0.001 V between two samples. The Von backstop (3.9 V,
+    /// latch off) held the load at 0 A, so the SDL's Battery test never saw a loaded reading
+    /// below V_Stop: its timer froze, the input stayed ON, and the run kept recording for
+    /// 32 minutes until stopped by hand.
+    @discardableResult
+    func checkCutoffWatchdog(_ m: Reading, cutoff: Double, run r: RunRecorder) async -> Bool {
+        let id = ObjectIdentifier(r)
+        guard m.current <= RunAnalysis.currentFloor, m.voltage <= cutoff else {
+            unloadedBelowCutoff = nil
+            return false
+        }
+        let count = (unloadedBelowCutoff?.run == id ? unloadedBelowCutoff!.count : 0) + 1
+        unloadedBelowCutoff = (id, count)
+        guard count >= Self.cutoffConfirmReadings else { return false }
+        unloadedBelowCutoff = nil
+        r.addEvent("safety", String(format: "%.3f V with no current flowing, at or below the %.3f V cut-off: LoadLab ended the run",
+                                    m.voltage, cutoff))
+        if r.info.kind != "profile" {      // endRun switches the input off for profiles
+            inputEpoch += 1
+            defer { inputEpoch += 1 }
+            if (try? await sdl.setInput(false)) == nil {
+                lastError = "Could not switch the input off — check the instrument"
+            }
+            state.inputOn = (try? await sdl.inputOn()) ?? state.inputOn
+        }
+        await endRun(status: .completed, reason: .voltageCutoff)
+        return true
     }
 
     /// The runner reached the end of its steps (or failed cleanly).

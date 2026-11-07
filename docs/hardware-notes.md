@@ -82,6 +82,7 @@ must set latch OFF explicitly and verify by read-back before switching the input
 - Counters are **integers: 1 mAh and 1 s resolution** (0.83 mAh still reads 0). LoadLab integrates V·I itself (trapezoidal, sub-mAh) and keeps the instrument count as a cross-check / fallback.
 - V_Stop ends the test (input OFF) within ~1.5 s of the voltage falling below it; C_Stop ended a 0.5 A run at 15 s (2.08 mAh actual, counter 2).
 - The instrument does not report *why* it stopped. LoadLab infers it: voltage cut-off if the last loaded reading was within 10 % of V_Stop or the relaxed voltage is at/below V_Stop; otherwise capacity/time limits by counter; else "input switched off".
+- **V_Stop is only checked while the load is sinking** (2026-11-07, Anker USB power bank, CC 1 A, V_Stop 4.0 V, backup Von 3.9 V latch OFF). The bank shut its output off, 4.98 V → 0.001 V between two samples. Von held the load at 0 A, and the Battery test **paused instead of ending**: `DISCHA:TIM` froze at 10473 s, the input stayed ON, and the run recorded for another 32 min until stopped by hand. LoadLab now ends a battery run itself (input OFF, reason "cut-off voltage", a `safety` event) after 2 readings in a row at/below V_Stop with no current; profiles get the same check.
 - Phase 3 T2 run (CC 0.5 A, V_Stop 3.5 V, supply ramped 4.0 → 3.3 V): completed by voltage cut-off at 3.516 V loaded; app 1.25 mAh vs counter 1 mAh; backup Von 3.4 V / latch OFF armed during the run and the user's Von/latch restored afterwards.
 
 ## Profiles (Phase 5) — measured with the E36234A as source, 2026-11-06
