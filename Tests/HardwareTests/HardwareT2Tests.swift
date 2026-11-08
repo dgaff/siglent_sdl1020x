@@ -290,6 +290,39 @@ struct HardwareT2Tests {
         try? FileManager.default.removeItem(at: store.root)
     }
 
+    /// Regression (Anker USB power bank, 2026-11-07): the source shuts its output off instead of
+    /// discharging through V_Stop (5 V → 0 V between two samples). The PSU output switching off
+    /// stands in for the bank. LoadLab must end the run and switch the input off.
+    @Test func batteryRunEndsWhenSourceCollapses() async throws {
+        let store = RunStore(root: FileManager.default.temporaryDirectory.appendingPathComponent("loadlab-hw-\(UUID().uuidString)"))
+        try await withRig(volts: 5.0, amps: 0.8) { s, psu in
+            s.runStore = store
+            var c = BatteryConfig()
+            c.mode = .cc; c.currentRange = .high; c.voltageRange = .high; c.level = 0.5
+            c.stopVoltageEnabled = true; c.stopVoltage = 4.0
+            var cell = CellInfo(); cell.name = "PSU collapse"
+            var o = RecordingOptions(); o.sampleRateHz = 2        // as in the real run
+            try await s.startBatteryRun(config: c, cell: cell, options: o)
+            let r = try #require(s.recorder)
+            try await Task.sleep(for: .seconds(4))
+            #expect(r.isActive)
+            try await psu.output(false)                          // the bank shuts off
+            let t0 = Date()
+            while r.isActive, Date().timeIntervalSince(t0) < 12 {
+                try await Task.sleep(for: .milliseconds(500))
+                let m = s.latest
+                print(String(format: "T2 collapse +%.1fs: V %.4f I %.5f inputOn %@ fn %@ active %@ devT %.0f",
+                             Date().timeIntervalSince(t0), m?.voltage ?? .nan, m?.current ?? .nan,
+                             "\(s.state.inputOn)", "\(s.state.function)", "\(r.isActive)", s.state.batteryTime_s))
+            }
+            print("T2 collapse: status \(r.info.status) reason \(String(describing: r.info.endReason)) events \(r.info.events.map(\.text))")
+            #expect(!r.isActive, "run still recording after the source collapsed")
+            #expect(r.info.endReason == .voltageCutoff)
+            #expect(!s.state.inputOn)
+        }
+        try? FileManager.default.removeItem(at: store.root)
+    }
+
     // MARK: - Phase 5: profile safety
 
     /// The failsafe a profile relies on: Von (latch off) stops the load with LoadLab fully
